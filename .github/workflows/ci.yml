@@ -58,7 +58,7 @@ jobs:
         shell: bash
         run: |
           pip install blake3 jsonschema
-          run=$(ls ci-out/logs | tail -n 1)
+          run=$(find ci-out/logs -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort | tail -n 1)
           python tests/verify_chain.py "ci-out/logs/$run"
           python tests/validate_reports.py "ci-out/reports/$run"
       - name: Build release binaries (Windows)
