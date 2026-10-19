@@ -1,0 +1,25 @@
+[package]
+name = "rv-hashinv-cli"
+description = "RV HashInv command-line interface"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "rv-hashinv"
+path = "src/main.rs"
+
+[dependencies]
+rv-hashinv-core.workspace = true
+clap.workspace = true
+indicatif.workspace = true
+ctrlc.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true
+tempfile.workspace = true
+serde_json.workspace = true

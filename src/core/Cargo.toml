@@ -1,0 +1,29 @@
+[package]
+name = "rv-hashinv-core"
+description = "RV HashInv core: evidence intake, dual hashing, audit chain, analysis and reports"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+build = "build.rs"
+
+[lib]
+name = "rv_hashinv_core"
+path = "src/lib.rs"
+
+[dependencies]
+md-5.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+sha3.workspace = true
+blake3.workspace = true
+digest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+minijinja.workspace = true
+chrono.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

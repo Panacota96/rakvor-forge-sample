@@ -1,0 +1,101 @@
+{
+  "lang": "fr",
+  "labels": {
+    "title_statistics": "Rapport statistique de l'exécution",
+    "title_technical": "Revue technique",
+    "title_summary": "Synthèse pour le client",
+    "tool": "Outil",
+    "version": "Version",
+    "run_id": "ID d'exécution",
+    "case": "Dossier",
+    "actor": "Expert",
+    "frontend": "Interface",
+    "started": "Début (UTC)",
+    "finished": "Fin (UTC)",
+    "duration": "Durée",
+    "algorithms": "Algorithmes de hachage",
+    "items": "Éléments",
+    "bytes": "Octets",
+    "errors": "Erreurs",
+    "throughput": "Débit",
+    "by_type": "Éléments par type détecté",
+    "findings_by_severity": "Constatations par gravité",
+    "findings_by_code": "Constatations par type",
+    "duplicates": "Groupes de doublons",
+    "item": "Élément",
+    "file": "Fichier",
+    "path": "Chemin",
+    "size": "Taille (octets)",
+    "modified": "Dernière modification (UTC)",
+    "detected_type": "Type détecté (signature)",
+    "extension": "Extension",
+    "hashes": "Empreintes",
+    "findings": "Constatations",
+    "severity": "Gravité",
+    "shows": "Ce que cela montre",
+    "does_not_prove": "Ce que cela ne prouve pas",
+    "status": "Statut",
+    "limitations": "Limites",
+    "audit": "Journal d'audit",
+    "audit_head": "Tête de la chaîne d'audit (SHA-256)",
+    "audit_entries": "Entrées d'audit",
+    "log_dir": "Dossier des journaux",
+    "report_dir": "Dossier des rapports",
+    "page": "Page",
+    "of": "sur",
+    "generated_by": "Généré par",
+    "cancelled_note": "L'exécution a été annulée par l'utilisateur ; seuls les éléments traités avant l'annulation sont rapportés.",
+    "none": "Aucun",
+    "unknown": "inconnu",
+    "method": "Méthode",
+    "method_text": "Chaque fichier a été ouvert en lecture seule, haché en une seule passe avec les algorithmes choisis et comparé à une table de signatures de fichiers. Chaque action a été inscrite dans un journal d'audit chaîné par empreintes.",
+    "conclusion": "Conclusion",
+    "what_we_did": "Ce que nous avons fait",
+    "what_we_found": "Ce que nous avons constaté",
+    "next_steps": "Prochaine étape recommandée",
+    "next_ok": "Aucune action n'est nécessaire pour ce fichier.",
+    "next_attention": "Examinez les constatations avec votre expert avant de vous appuyer sur ce fichier.",
+    "next_problem": "Ne vous appuyez pas sur ce fichier tant que l'expert n'a pas expliqué le problème.",
+    "status_ok": "Aucun problème",
+    "status_attention": "À examiner",
+    "status_problem": "Problème détecté",
+    "summary_ok": "Le fichier a été haché et vérifié. Les contrôles appliqués n'ont relevé aucun problème.",
+    "summary_attention": "Le fichier a été haché et vérifié. Certains points méritent attention.",
+    "summary_problem": "Le fichier n'a pas pu être entièrement examiné ou présente un problème sérieux.",
+    "fingerprint": "Empreinte numérique",
+    "fingerprint_text": "Cette empreinte identifie le contenu exact du fichier. Toute modification, même d'un seul caractère, produirait une valeur différente."
+  },
+  "severity": { "high": "Élevée", "medium": "Moyenne", "low": "Faible", "info": "Information" },
+  "findings": {
+    "EMPTY_FILE": {
+      "title": "Fichier vide",
+      "shows": "Le fichier ne contient aucune donnée (0 octet).",
+      "does_not_prove": "Cela n'indique pas si le fichier a été vidé volontairement ou créé vide."
+    },
+    "EXTENSION_MISMATCH": {
+      "title": "L'extension ne correspond pas au contenu",
+      "shows": "Le nom se termine par .%{extension}, mais le contenu commence par la signature d'un fichier %{detected}.",
+      "does_not_prove": "Renommer un fichier est courant et souvent anodin ; cela ne prouve pas à lui seul une volonté de dissimulation."
+    },
+    "EXECUTABLE_CONTENT": {
+      "title": "Contenu exécutable sous un autre nom",
+      "shows": "Le contenu est un programme %{detected} alors que le nom se termine par .%{extension}.",
+      "does_not_prove": "Cela ne montre pas que le programme est malveillant ; il faut l'analyser dans un environnement isolé."
+    },
+    "DUPLICATE": {
+      "title": "Contenu en double",
+      "shows": "Un contenu identique (même %{algorithm}) figure dans %{count} fichiers : %{others}.",
+      "does_not_prove": "Des empreintes identiques montrent un contenu identique, pas qui a copié le fichier ni quand."
+    },
+    "UNREADABLE": {
+      "title": "Fichier illisible",
+      "shows": "La lecture a échoué : %{error}.",
+      "does_not_prove": "Cela ne prouve pas que le fichier est endommagé ; des droits d'accès ou un verrou peuvent en être la cause."
+    }
+  },
+  "limitations": {
+    "SIGNATURE_TABLE_LIMITED": "La détection du type repose sur une table limitée de signatures courantes ; les types inconnus sont signalés comme inconnus, non comme suspects.",
+    "TIMESTAMPS_FROM_FILESYSTEM": "Les dates de modification proviennent du système de fichiers de la copie examinée et peuvent différer de la source d'origine.",
+    "CLEAN_RESULT_IS_NOT_AUTHENTICITY": "Un résultat sans constatation ne prouve pas qu'un fichier est authentique ni qu'il n'a pas été modifié avant son acquisition."
+  }
+}

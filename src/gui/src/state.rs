@@ -1,0 +1,467 @@
+//! Everything the window shows and every rule it enforces, without any drawing code.
+//! Kept separate from `app.rs` so it can be unit-tested headless (CI has no display).
+
+use rv_hashinv_core::{
+    Event, HashAlgo, RunConfig, TOOL_NAME, TOOL_VERSION, hash, i18n, time::human_duration,
+};
+use serde_json::{Value, json};
+use std::path::PathBuf;
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Phase {
+    Idle,
+    Running,
+    Finished,
+    Cancelled,
+    Failed(String),
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Progress {
+    pub done: u64,
+    pub total: u64,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+    pub elapsed_ms: u64,
+    pub eta_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Outcome {
+    pub items: u64,
+    pub errors: u64,
+    pub high: u64,
+    pub medium: u64,
+    pub low: u64,
+    pub info: u64,
+    pub report: PathBuf,
+    pub log_dir: PathBuf,
+}
+
+pub const LANG_CHOICES: [(&str, &str); 4] = [
+    ("en", "English"),
+    ("es", "Español"),
+    ("fr", "Français"),
+    ("all", "All three (EN + ES + FR)"),
+];
+
+#[derive(Clone, Debug)]
+pub struct GuiState {
+    pub inputs: Vec<PathBuf>,
+    pub path_entry: String,
+    pub recursive: bool,
+    pub selected: Vec<HashAlgo>,
+    pub lang: String,
+    pub out_dir: String,
+    pub actor: String,
+    pub case_id: String,
+    pub phase: Phase,
+    pub progress: Progress,
+    pub current_item: String,
+    pub warnings: Vec<String>,
+    pub outcome: Option<Outcome>,
+    /// User actions recorded before the run; handed to the core as audit preamble entries.
+    pub ui_actions: Vec<(String, Value)>,
+}
+
+impl Default for GuiState {
+    fn default() -> Self {
+        GuiState {
+            inputs: vec![],
+            path_entry: String::new(),
+            recursive: true,
+            selected: vec![HashAlgo::Sha256],
+            lang: "en".into(),
+            out_dir: "rakvor-out".into(),
+            actor: rv_hashinv_core::env::os_user(),
+            case_id: String::new(),
+            phase: Phase::Idle,
+            progress: Progress::default(),
+            current_item: String::new(),
+            warnings: vec![],
+            outcome: None,
+            ui_actions: vec![],
+        }
+    }
+}
+
+impl GuiState {
+    /// Records a user action with the time it happened (written to the audit log when the run starts).
+    fn note(&mut self, action: &str, mut details: Value) {
+        if let Some(o) = details.as_object_mut() {
+            o.insert("at_utc".into(), json!(rv_hashinv_core::time::utc_now()));
+        }
+        self.ui_actions.push((action.to_string(), details));
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.phase == Phase::Running
+    }
+
+    /// A checkbox is clickable if it can be unticked (more than one ticked) or ticked (fewer than two ticked).
+    pub fn can_toggle(&self, a: HashAlgo) -> bool {
+        if self.selected.contains(&a) {
+            self.selected.len() > 1
+        } else {
+            self.selected.len() < HashAlgo::MAX_SELECTED
+        }
+    }
+
+    pub fn toggle_algo(&mut self, a: HashAlgo) -> Result<(), String> {
+        if !self.can_toggle(a) {
+            return Err(if self.selected.contains(&a) {
+                "At least one hash algorithm is required.".into()
+            } else {
+                format!(
+                    "At most {} hash algorithms can be selected.",
+                    HashAlgo::MAX_SELECTED
+                )
+            });
+        }
+        if let Some(i) = self.selected.iter().position(|x| *x == a) {
+            self.selected.remove(i);
+        } else {
+            self.selected.push(a);
+        }
+        self.note(
+            "ui_hash_selection_changed",
+            json!({"algorithms": self.selected}),
+        );
+        Ok(())
+    }
+
+    pub fn add_input(&mut self, p: PathBuf) {
+        if !self.inputs.contains(&p) {
+            self.note("ui_input_added", json!({"path": p.display().to_string()}));
+            self.inputs.push(p);
+        }
+    }
+
+    pub fn add_typed_path(&mut self) {
+        let t = self.path_entry.trim().trim_matches('"').to_string();
+        if !t.is_empty() {
+            self.add_input(PathBuf::from(t));
+            self.path_entry.clear();
+        }
+    }
+
+    pub fn remove_input(&mut self, i: usize) {
+        if i < self.inputs.len() {
+            let p = self.inputs.remove(i);
+            self.note("ui_input_removed", json!({"path": p.display().to_string()}));
+        }
+    }
+
+    pub fn set_lang(&mut self, l: &str) {
+        if self.lang != l {
+            self.lang = l.to_string();
+            self.note("ui_language_changed", json!({"lang": l}));
+        }
+    }
+
+    pub fn set_recursive(&mut self, r: bool) {
+        if self.recursive != r {
+            self.recursive = r;
+            self.note("ui_recursive_changed", json!({"recursive": r}));
+        }
+    }
+
+    pub fn can_start(&self) -> bool {
+        !self.is_running() && !self.inputs.is_empty() && !self.out_dir.trim().is_empty()
+    }
+
+    /// Builds the run configuration; the recorded UI actions become audit preamble entries.
+    pub fn to_config(&self) -> Result<RunConfig, String> {
+        if self.inputs.is_empty() {
+            return Err("Add at least one file or folder.".into());
+        }
+        hash::validate_selection(&self.selected)?;
+        let langs = i18n::parse_langs(&self.lang)?;
+        let mut preamble = self.ui_actions.clone();
+        preamble.push(("ui_start_clicked".into(), json!({"algorithms": self.selected, "lang": self.lang, "recursive": self.recursive, "inputs": self.inputs.len()})));
+        let settings = vec![
+            format!("{} (gui)", TOOL_NAME),
+            format!(
+                "inputs={}",
+                self.inputs
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(";")
+            ),
+            format!(
+                "hash={}",
+                self.selected
+                    .iter()
+                    .map(|a| a.name())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            format!("lang={}", self.lang),
+            format!("recursive={}", self.recursive),
+            format!("out={}", self.out_dir.trim()),
+        ];
+        Ok(RunConfig {
+            inputs: self.inputs.clone(),
+            input_list: None,
+            recursive: self.recursive,
+            algorithms: self.selected.clone(),
+            out_dir: PathBuf::from(self.out_dir.trim()),
+            langs,
+            actor: if self.actor.trim().is_empty() {
+                rv_hashinv_core::env::os_user()
+            } else {
+                self.actor.trim().to_string()
+            },
+            case_id: Some(self.case_id.trim().to_string()).filter(|s| !s.is_empty()),
+            frontend: "gui".into(),
+            preamble,
+            command_line: settings,
+            tool_name: TOOL_NAME.into(),
+            tool_version: TOOL_VERSION.into(),
+        })
+    }
+
+    pub fn start(&mut self) {
+        self.phase = Phase::Running;
+        self.progress = Progress::default();
+        self.current_item.clear();
+        self.warnings.clear();
+        self.outcome = None;
+        // Recorded actions now belong to this run's audit log.
+        self.ui_actions.clear();
+    }
+
+    pub fn apply(&mut self, e: &Event) {
+        match e {
+            Event::RunStarted {
+                total_items,
+                total_bytes,
+                ..
+            } => {
+                self.progress.total = *total_items;
+                self.progress.bytes_total = *total_bytes;
+            }
+            Event::ItemStarted { path, .. } => self.current_item = path.clone(),
+            Event::Progress {
+                done,
+                total,
+                bytes_done,
+                bytes_total,
+                elapsed_ms,
+                eta_ms,
+            } => {
+                self.progress = Progress {
+                    done: *done,
+                    total: *total,
+                    bytes_done: *bytes_done,
+                    bytes_total: *bytes_total,
+                    elapsed_ms: *elapsed_ms,
+                    eta_ms: *eta_ms,
+                };
+            }
+            Event::Error { path, message } => {
+                self.warnings
+                    .push(format!("{}: {}", path.as_deref().unwrap_or("-"), message))
+            }
+            Event::RunFinished {
+                items,
+                errors,
+                high,
+                medium,
+                low,
+                info,
+                report_dir,
+                log_dir,
+                cancelled,
+                elapsed_ms,
+                ..
+            } => {
+                self.progress.elapsed_ms = *elapsed_ms;
+                self.progress.eta_ms = None;
+                let lang = if self.lang == "all" {
+                    "en".to_string()
+                } else {
+                    self.lang.clone()
+                };
+                self.outcome = Some(Outcome {
+                    items: *items,
+                    errors: *errors,
+                    high: *high,
+                    medium: *medium,
+                    low: *low,
+                    info: *info,
+                    report: PathBuf::from(report_dir).join(format!("statistics.{}.html", lang)),
+                    log_dir: PathBuf::from(log_dir),
+                });
+                self.phase = if *cancelled {
+                    Phase::Cancelled
+                } else {
+                    Phase::Finished
+                };
+                self.current_item.clear();
+            }
+            _ => {}
+        }
+    }
+
+    pub fn fail(&mut self, msg: String) {
+        self.phase = Phase::Failed(msg);
+    }
+
+    /// 0.0..=1.0, by bytes (or by files when every file is empty).
+    pub fn fraction(&self) -> f32 {
+        let p = &self.progress;
+        if p.bytes_total > 0 {
+            (p.bytes_done as f64 / p.bytes_total as f64).clamp(0.0, 1.0) as f32
+        } else if p.total > 0 {
+            (p.done as f64 / p.total as f64) as f32
+        } else if matches!(self.phase, Phase::Finished) {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
+    /// `live_elapsed_ms` is measured by the window clock so the timer keeps moving between events.
+    pub fn timing_text(&self, live_elapsed_ms: Option<u64>) -> String {
+        let elapsed = live_elapsed_ms
+            .unwrap_or(self.progress.elapsed_ms)
+            .max(self.progress.elapsed_ms);
+        let eta = match self.progress.eta_ms {
+            Some(ms) if self.is_running() => human_duration(ms),
+            _ => "\u{2014}".into(),
+        };
+        format!(
+            "Elapsed: {}   ·   Remaining (estimate): {}",
+            human_duration(elapsed),
+            eta
+        )
+    }
+
+    pub fn progress_text(&self) -> String {
+        format!(
+            "{} / {} files  ·  {:.0}%",
+            self.progress.done,
+            self.progress.total,
+            self.fraction() * 100.0
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn at_most_two_and_at_least_one_algorithm() {
+        let mut s = GuiState::default();
+        assert_eq!(s.selected, vec![HashAlgo::Sha256]);
+        assert!(
+            !s.can_toggle(HashAlgo::Sha256),
+            "cannot untick the last one"
+        );
+        assert!(s.toggle_algo(HashAlgo::Sha256).is_err());
+        s.toggle_algo(HashAlgo::Md5).unwrap();
+        assert!(
+            !s.can_toggle(HashAlgo::Blake3),
+            "third checkbox is disabled"
+        );
+        assert!(s.toggle_algo(HashAlgo::Blake3).is_err());
+        assert!(s.can_toggle(HashAlgo::Sha256));
+        s.toggle_algo(HashAlgo::Sha256).unwrap();
+        assert_eq!(s.selected, vec![HashAlgo::Md5]);
+    }
+
+    #[test]
+    fn settings_changes_become_audit_preamble() {
+        let mut s = GuiState::default();
+        assert!(s.to_config().is_err(), "no input yet");
+        s.path_entry = "\"C:\\evidence\"".into();
+        s.add_typed_path();
+        s.toggle_algo(HashAlgo::Blake3).unwrap();
+        s.set_lang("es");
+        let cfg = s.to_config().unwrap();
+        assert_eq!(cfg.inputs, vec![PathBuf::from("C:\\evidence")]);
+        assert_eq!(cfg.frontend, "gui");
+        let actions: Vec<&str> = cfg.preamble.iter().map(|(a, _)| a.as_str()).collect();
+        assert_eq!(
+            actions,
+            vec![
+                "ui_input_added",
+                "ui_hash_selection_changed",
+                "ui_language_changed",
+                "ui_start_clicked"
+            ]
+        );
+        s.start();
+        assert!(s.ui_actions.is_empty());
+    }
+
+    #[test]
+    fn events_drive_progress_and_outcome() {
+        let mut s = GuiState::default();
+        s.start();
+        s.apply(&Event::RunStarted {
+            run_id: "R".into(),
+            tool: "t".into(),
+            version: "v".into(),
+            frontend: "gui".into(),
+            algorithms: vec![HashAlgo::Sha256],
+            langs: vec!["en".into()],
+            total_items: 4,
+            total_bytes: 400,
+        });
+        s.apply(&Event::Progress {
+            done: 1,
+            total: 4,
+            bytes_done: 100,
+            bytes_total: 400,
+            elapsed_ms: 2000,
+            eta_ms: Some(6000),
+        });
+        assert!((s.fraction() - 0.25).abs() < 1e-6);
+        assert!(s.timing_text(Some(2500)).contains("6.0 s"));
+        assert!(s.progress_text().starts_with("1 / 4"));
+        s.apply(&Event::RunFinished {
+            items: 4,
+            bytes: 400,
+            errors: 0,
+            elapsed_ms: 8000,
+            high: 1,
+            medium: 0,
+            low: 0,
+            info: 0,
+            report_dir: "out/reports/R".into(),
+            log_dir: "out/logs/R".into(),
+            cancelled: false,
+        });
+        assert_eq!(s.phase, Phase::Finished);
+        assert_eq!(
+            s.outcome.as_ref().unwrap().report,
+            PathBuf::from("out/reports/R/statistics.en.html")
+        );
+    }
+
+    #[test]
+    fn a_real_run_from_gui_settings_is_audited() {
+        let ev = std::env::temp_dir().join(format!("rv-gui-test-{}", std::process::id()));
+        std::fs::create_dir_all(&ev).unwrap();
+        std::fs::write(ev.join("a.txt"), "x").unwrap();
+        let mut s = GuiState::default();
+        s.add_input(ev.clone());
+        s.out_dir = ev.join("out").display().to_string();
+        let cfg = s.to_config().unwrap();
+        s.start();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let summary = rv_hashinv_core::run(&cfg, &mut |e| s.apply(e), &cancel).unwrap();
+        assert_eq!(s.phase, Phase::Finished);
+        let log = std::fs::read_to_string(summary.log_dir.join("audit.jsonl")).unwrap();
+        assert!(
+            log.contains("\"ui_input_added\"")
+                && log.contains("\"ui_start_clicked\"")
+                && log.contains("\"frontend\":\"gui\"")
+        );
+        let _ = std::fs::remove_dir_all(&ev);
+    }
+}
