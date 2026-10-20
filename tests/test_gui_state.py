@@ -46,9 +46,7 @@ def test_events_drive_progress():
     s = GuiState()
     s.start()
     s.apply({"event": "run_started", "total_items": 4, "total_bytes": 400})
-    s.apply(
-        {"event": "progress", "done": 1, "total": 4, "bytes_done": 100, "bytes_total": 400, "elapsed_ms": 2000, "eta_ms": 6000}
-    )
+    s.apply({"event": "progress", "done": 1, "total": 4, "bytes_done": 100, "bytes_total": 400, "elapsed_ms": 2000, "eta_ms": 6000})
     assert s.fraction() == 0.25 and "6.0 s" in s.timing_text(2500) and s.progress_text().startswith("1 / 4")
     s.apply(
         {

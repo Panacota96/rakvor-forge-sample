@@ -25,6 +25,7 @@ from .report import (
     ItemResult,
     RunInfo,
     RunTotals,
+    capped_list,
     duplicate_groups,
     pretty,
     write_hashed,
@@ -32,6 +33,7 @@ from .report import (
     write_statistics,
 )
 from .timeutil import utc_compact, utc_from_timestamp, utc_now
+from .trust import PdfSigner, TimestampError, timestamp_head
 
 PROGRESS_EVERY_S = 0.15
 
@@ -51,6 +53,10 @@ class RunConfig:
     command_line: list[str] = field(default_factory=list)
     tool_name: str = "rv-hashinv"
     tool_version: str = "0.0.0"
+    jurisdiction: str = "co"  # custody form: co (Colombia, Fiscalía) | fr (France, scellés)
+    tsa_url: str | None = None  # RFC 3161 time-stamping authority; None = no timestamp
+    sign_cert: Path | None = None  # examiner's .p12/.pfx for PDF signatures
+    sign_password: str | None = field(default=None, repr=False)  # never logged
 
 
 @dataclass
@@ -68,6 +74,7 @@ class RunSummary:
     report_dir: Path
     log_dir: Path
     audit_head: str
+    timestamp: dict = field(default_factory=lambda: {"status": "off"})
 
 
 def _new_run_id() -> str:
@@ -82,6 +89,8 @@ def run(cfg: RunConfig, sink: Sink, cancel: threading.Event) -> RunSummary:
         raise ValueError("select at least one report language")
     for lang in cfg.langs:
         i18n.parse_langs(lang)
+    if cfg.jurisdiction not in ("co", "fr"):
+        raise ValueError(f"unknown jurisdiction '{cfg.jurisdiction}': use co or fr")
     started = time.monotonic()
     started_utc = utc_now()
     run_id = _new_run_id()
@@ -107,6 +116,9 @@ def run(cfg: RunConfig, sink: Sink, cancel: threading.Event) -> RunSummary:
                 "input_list": str(cfg.input_list) if cfg.input_list else None,
                 "recursive": cfg.recursive,
                 "out_dir": str(cfg.out_dir),
+                "jurisdiction": cfg.jurisdiction,
+                "tsa_url": cfg.tsa_url,
+                "sign_cert": str(cfg.sign_cert) if cfg.sign_cert else None,
             },
         )
         for action, details in cfg.preamble:
@@ -118,6 +130,18 @@ def run(cfg: RunConfig, sink: Sink, cancel: threading.Event) -> RunSummary:
             cfg.algorithms,
         )
         log.record("environment_recorded", "environment.json", env_digest)
+        signer = None
+        if cfg.sign_cert:
+            try:
+                signer = PdfSigner.load(Path(cfg.sign_cert), cfg.sign_password)
+            except ValueError as e:
+                log.record("run_failed", None, {"reason": str(e)})
+                raise
+            log.record(
+                "signing_certificate_loaded",
+                str(cfg.sign_cert),
+                {"subject": signer.subject, "certificate_sha256": signer.fingerprint_sha256},
+            )
 
         try:
             items = collect([Path(p) for p in cfg.inputs], cfg.input_list, cfg.recursive)
@@ -251,10 +275,8 @@ def run(cfg: RunConfig, sink: Sink, cancel: threading.Event) -> RunSummary:
             names = [results[i].file_name for i in idx]
             log.record("duplicate_group", None, {"algorithm": primary, "hash": digest, "items": [results[i].index for i in idx]})
             for pos, i in enumerate(idx):
-                others = ", ".join(n for j, n in enumerate(names) if j != pos)
-                results[i].findings.append(
-                    Finding("DUPLICATE", "info", {"algorithm": primary, "count": str(len(idx)), "others": others})
-                )
+                others = capped_list([n for j, n in enumerate(names) if j != pos], 10)
+                results[i].findings.append(Finding("DUPLICATE", "info", {"algorithm": primary, "count": str(len(idx)), "others": others}))
 
         buf = io.StringIO(newline="")
         w = csv.writer(buf, lineterminator="\n")
@@ -278,6 +300,8 @@ def run(cfg: RunConfig, sink: Sink, cancel: threading.Event) -> RunSummary:
             utc_now(),
             elapsed(),
             cancelled,
+            jurisdiction=cfg.jurisdiction,
+            signer=signer,
         )
         for r in results:
             files = write_item_reports(report_dir / "items" / r.folder, info, r, AuditRef(log.head, log.seq, str(log_dir)))
@@ -285,6 +309,17 @@ def run(cfg: RunConfig, sink: Sink, cancel: threading.Event) -> RunSummary:
         if results:
             sink(event("report_written", kind="items", path=str(report_dir / "items")))
         totals = RunTotals(len(results), sum(r.size for r in results), errors)
+        # Trusted timestamp of the chain head: covers every evidence hash, finding and per-item report digest.
+        info.timestamp = {"status": "off"}
+        if cfg.tsa_url:
+            try:
+                ts = timestamp_head(log_dir, log.seq, log.head, cfg.tsa_url)
+                log.record("timestamp_obtained", ts.file, ts.to_json())
+                info.timestamp = {"status": "ok", **ts.to_json()}
+            except TimestampError as e:
+                log.record("timestamp_pending", None, {"tsa": cfg.tsa_url, "reason": str(e), "covers_seq": log.seq, "head": log.head})
+                info.timestamp = {"status": "pending", "tsa": cfg.tsa_url, "reason": str(e)}
+            sink(event("timestamp", **info.timestamp))
         files = write_statistics(report_dir, info, results, totals, AuditRef(log.head, log.seq, str(log_dir)))
         log.record("statistics_report_written", None, {"files": files})
         sink(event("report_written", kind="statistics", path=str(report_dir / f"statistics.{cfg.langs[0]}.html")))
@@ -332,6 +367,7 @@ def run(cfg: RunConfig, sink: Sink, cancel: threading.Event) -> RunSummary:
             report_dir,
             log_dir,
             log.head,
+            info.timestamp,
         )
     finally:
         log.close()

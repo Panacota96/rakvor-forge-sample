@@ -69,8 +69,15 @@ rv-hashinv self-test
 # Review a folder with SHA-256 + MD5, reports in Spanish, for case CASE-2026-014
 rv-hashinv scan -i D:\evidence -r --hash sha256,md5 --lang es --case CASE-2026-014 --actor "Ana Ruiz"
 
-# Later, prove the log was not altered
+# French case: custody form in French + English, every PDF signed with your certificate
+$env:RV_SIGN_PASSWORD = Read-Host -AsSecureString | ConvertFrom-SecureString -AsPlainText
+rv-hashinv scan -i D:\evidence -r --jurisdiction fr --sign-cert C:\certs\examiner.p12 --lang fr
+
+# Later, prove the log was not altered (also checks the RFC 3161 timestamp)
 rv-hashinv verify-log rakvor-out\logs\<RUN-ID>
+
+# The run was offline? Add the trusted timestamp once the network is back
+rv-hashinv timestamp rakvor-out\logs\<RUN-ID>
 ```
 
 Every option, example and exit code: [docs/usage-cli.md](docs/usage-cli.md) (generated from `--help`).
@@ -90,6 +97,8 @@ flowchart TB
     REP --> IT["items/NNNNN-name/"]
     IT --> T["technical.json / .LANG.html / .LANG.pdf"]
     IT --> S["summary.json / .LANG.html / .LANG.pdf"]
+    IT --> K["custody.json / custody.es|fr + .en .html/.pdf"]
+    LOGS --> L5["timestamp-N.tsr — RFC 3161 token"]
 ```
 
 | Exit code | Meaning |

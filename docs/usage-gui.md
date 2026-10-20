@@ -25,6 +25,8 @@ flowchart TD
 | **1. Evidence** | *Add files…* and *Add folder…* open the file pickers. You can also drag files or folders onto the window (or onto the `rv-hashinv-gui.exe` icon before it starts), or paste a path and press Enter. *Include subfolders* is on by default. Select entries and press **Remove selected**. |
 | **2. Hash algorithms** | Tick one or two. When two are ticked, the others are disabled; you cannot untick the last one. |
 | **3. Reports** | Language (English, Español, Français, or all three), output folder, examiner name (defaults to your Windows user), optional case ID. |
+| **4. Trust** | *Trusted timestamp* (on by default; TSA address editable), *Certificate…* to pick your `.p12`/`.pfx` and its password (kept in memory only, never logged) so every PDF is signed, and *Jurisdiction* (Colombia / France) for the custody form. |
+| **Interface language** | Top-right selector: English, Español, Français. Changes every label immediately; independent of the report language. |
 | **Start review / Cancel** | Start is enabled once evidence is added. During a run the settings are locked and the button becomes *Cancel*. |
 | **Progress** | Bar by bytes processed, `files done / total`, elapsed time (always moving) and estimated time remaining. The file being read is shown below. |
 | **Result** | Counts by severity, **Open report** (statistics page in your language) and **Open log folder**. |

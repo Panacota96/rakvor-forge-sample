@@ -1,9 +1,10 @@
 <!doctype html>
 <html lang="{{ lang }}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ t.title_statistics }} — {{ run.run_id }}</title><style>{{ css|safe }}</style></head>
-<body><main>
+<body><div class="band"><div class="inner">{{ logo_svg|safe }}<div><div class="word">RAKVOR</div><div class="desc">{{ brand.descriptor }}</div></div></div></div>
+<main>
 <header>
-  <div><div class="mark">RAKVOR · FORENSICS</div><h1>{{ t.title_statistics }}</h1><div>{{ tool.name }} {{ tool.version }}</div></div>
+  <div><h1>{{ t.title_statistics }}</h1><div>{{ tool.name }} {{ tool.version }}</div></div>
   <div class="meta">
     <div>{{ t.run_id }}: <strong>{{ run.run_id }}</strong></div>
     {% if run.case_id %}<div>{{ t.case }}: {{ run.case_id }}</div>{% endif %}
@@ -52,11 +53,19 @@
 <h2>{{ t.limitations }}</h2>
 <ul>{% for l in limitations %}<li>{{ l }}</li>{% endfor %}</ul>
 
+<h2>{{ t.timestamp }}</h2>
+<div class="kv">
+  <div>{{ t.status }}</div><div>{{ timestamp.status_label }}</div>
+  {% if timestamp.tsa %}<div>{{ t.tsa }}</div><div class="mono">{{ timestamp.tsa }}</div>{% endif %}
+  {% if timestamp.gen_time %}<div>{{ t.gen_time }}</div><div>{{ timestamp.gen_time }}</div>
+  <div>{{ t.covers }}</div><div>#{{ timestamp.covers_seq }} · <span class="mono">{{ timestamp.head }}</span></div>{% endif %}
+</div>
+
 <h2>{{ t.audit }}</h2>
 <div class="kv">
   <div>{{ t.audit_head }}</div><div class="mono">{{ audit.head }}</div>
   <div>{{ t.audit_entries }}</div><div>{{ audit.entries }}</div>
   <div>{{ t.log_dir }}</div><div class="mono">{{ audit.log_dir }}</div>
 </div>
-<footer>{{ t.generated_by }} {{ tool.name }} {{ tool.version }} · {{ run.run_id }}</footer>
+<footer><div class="tagline">{{ brand.tagline }}</div>{{ t.generated_by }} {{ tool.name }} {{ tool.version }} · {{ run.run_id }} · {% if signature.signed %}{{ t.signed_by }} {{ signature.by }} (PDF){% else %}{{ t.not_signed }}{% endif %}</footer>
 </main></body></html>

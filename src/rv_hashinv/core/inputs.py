@@ -39,9 +39,7 @@ def collect(inputs: list[Path], list_file: Path | None = None, recursive: bool =
             if recursive:
                 for root, dirs, names in os.walk(p, followlinks=False):
                     dirs[:] = [d for d in dirs if not (Path(root) / d).is_symlink()]
-                    files.update(
-                        Path(root) / n for n in names if (Path(root) / n).is_file() and not (Path(root) / n).is_symlink()
-                    )
+                    files.update(Path(root) / n for n in names if (Path(root) / n).is_file() and not (Path(root) / n).is_symlink())
             else:
                 files.update(c for c in p.iterdir() if c.is_file() and not c.is_symlink())
         elif not p.exists():

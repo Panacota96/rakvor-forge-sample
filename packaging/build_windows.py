@@ -21,6 +21,7 @@ COMMON = [
     sys.executable, "-m", "nuitka", "--standalone", "--assume-yes-for-downloads", "--remove-output",
     f"--output-dir={DIST / 'build'}",
     "--include-package-data=rv_hashinv",
+    f"--windows-icon-from-ico={ROOT / 'src' / 'rv_hashinv' / 'resources' / 'brand' / 'rv.ico'}",
     "--company-name=Rakvor", "--product-name=RV HashInv",
     f"--file-version={VERSION}", f"--product-version={VERSION}",
 ]

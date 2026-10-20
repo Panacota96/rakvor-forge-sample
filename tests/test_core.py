@@ -60,9 +60,7 @@ def test_analyzer():
 
 def test_i18n_catalogues_share_keys_and_langs_parse():
     def keys(v, prefix=""):
-        return sorted(
-            k for key, val in v.items() for k in (keys(val, f"{prefix}.{key}") if isinstance(val, dict) else [f"{prefix}.{key}"])
-        )
+        return sorted(k for key, val in v.items() for k in (keys(val, f"{prefix}.{key}") if isinstance(val, dict) else [f"{prefix}.{key}"]))
 
     assert keys(catalog("en")) == keys(catalog("es")) == keys(catalog("fr"))
     assert parse_langs("all") == ["en", "es", "fr"]

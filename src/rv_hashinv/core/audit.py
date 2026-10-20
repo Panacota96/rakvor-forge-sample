@@ -56,6 +56,20 @@ class AuditLog:
         self.run_id = run_id
         self.actor = actor
 
+    @classmethod
+    def resume(cls, directory: Path, actor: str) -> AuditLog:
+        """Re-opens an existing, intact log to append later actions (e.g. a delayed timestamp)."""
+        n, problems = verify(directory / "audit.jsonl")
+        if problems:
+            raise ValueError(f"refusing to append to a broken audit log: {problems[0]}")
+        last = json.loads((directory / "audit.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+        self = cls.__new__(cls)
+        self.dir = directory
+        self._jsonl = open(directory / "audit.jsonl", "a", encoding="utf-8", newline="\n")  # noqa: SIM115
+        self._text = open(directory / "audit.log", "a", encoding="utf-8", newline="\n")  # noqa: SIM115
+        self.seq, self.head, self.run_id, self.actor = n, last["entry_hash"], last["run_id"], actor
+        return self
+
     def record(self, action: str, item: str | None = None, details: Any = None) -> int:
         self.seq += 1
         ts = utc_now()
@@ -75,6 +89,16 @@ class AuditLog:
     def close(self) -> None:
         self._jsonl.close()
         self._text.close()
+
+
+def heads(path: Path) -> dict[int, str]:
+    """seq -> entry_hash, for checking what a timestamp covers."""
+    out = {}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            e = json.loads(line)
+            out[e.get("seq")] = e.get("entry_hash")
+    return out
 
 
 def verify(path: Path) -> tuple[int, list[str]]:

@@ -11,8 +11,9 @@ from .. import TOOL_NAME, __version__
 from ..core import RunConfig
 from ..core.envinfo import os_user
 from ..core.hashing import ALGORITHMS, MAX_SELECTED, validate_selection
-from ..core.i18n import parse_langs
+from ..core.i18n import catalog, parse_langs
 from ..core.timeutil import human_duration, utc_now
+from ..core.trust import DEFAULT_TSA
 
 LANG_CHOICES = [("en", "English"), ("es", "Español"), ("fr", "Français"), ("all", "All three (EN + ES + FR)")]
 
@@ -55,6 +56,37 @@ class GuiState:
     warnings: list[str] = field(default_factory=list)
     outcome: Outcome | None = None
     ui_actions: list[tuple[str, dict]] = field(default_factory=list)
+    ui_lang: str = "en"
+    jurisdiction: str = "co"
+    timestamp: bool = True
+    tsa_url: str = DEFAULT_TSA
+    sign_cert: str = ""
+    sign_password: str = field(default="", repr=False)  # kept in memory only, never logged
+
+    def tr(self, key: str) -> str:
+        return catalog(self.ui_lang)["ui"].get(key, key)
+
+    def set_ui_lang(self, lang: str) -> None:
+        if lang in ("en", "es", "fr") and lang != self.ui_lang:
+            self.ui_lang = lang
+            self._note("ui_interface_language_changed", {"ui_lang": lang})
+
+    def set_jurisdiction(self, j: str) -> None:
+        if j in ("co", "fr") and j != self.jurisdiction:
+            self.jurisdiction = j
+            self._note("ui_jurisdiction_changed", {"jurisdiction": j})
+
+    def set_timestamp(self, on: bool, url: str | None = None) -> None:
+        url = (url or self.tsa_url).strip()
+        if on != self.timestamp or url != self.tsa_url:
+            self.timestamp, self.tsa_url = on, url
+            self._note("ui_timestamp_changed", {"enabled": on, "tsa_url": url})
+
+    def set_sign_cert(self, path: str) -> None:
+        path = path.strip().strip('"')
+        if path != self.sign_cert:
+            self.sign_cert = path
+            self._note("ui_signing_certificate_changed", {"path": path or None})
 
     def _note(self, action: str, details: dict) -> None:
         """Records a user action with the time it happened (audited when the run starts)."""
@@ -72,9 +104,7 @@ class GuiState:
             raise ValueError(f"unknown algorithm {algo}")
         if not self.can_toggle(algo):
             raise ValueError(
-                "At least one hash algorithm is required."
-                if algo in self.selected
-                else f"At most {MAX_SELECTED} hash algorithms can be selected."
+                "At least one hash algorithm is required." if algo in self.selected else f"At most {MAX_SELECTED} hash algorithms can be selected."
             )
         if algo in self.selected:
             self.selected.remove(algo)
@@ -112,6 +142,8 @@ class GuiState:
             raise ValueError("Add at least one file or folder.")
         validate_selection(self.selected)
         langs = parse_langs(self.lang)
+        if self.sign_cert and not Path(self.sign_cert).is_file():
+            raise ValueError(f"Signing certificate not found: {self.sign_cert}")
         preamble = list(self.ui_actions) + [
             (
                 "ui_start_clicked",
@@ -120,6 +152,9 @@ class GuiState:
                     "lang": self.lang,
                     "recursive": self.recursive,
                     "inputs": len(self.inputs),
+                    "jurisdiction": self.jurisdiction,
+                    "timestamp": self.timestamp,
+                    "pdf_signing": bool(self.sign_cert),
                     "at_utc": utc_now(),
                 },
             )
@@ -131,6 +166,9 @@ class GuiState:
             f"lang={self.lang}",
             f"recursive={str(self.recursive).lower()}",
             f"out={self.out_dir.strip()}",
+            f"jurisdiction={self.jurisdiction}",
+            f"tsa={self.tsa_url if self.timestamp else 'off'}",
+            f"sign_cert={self.sign_cert or 'none'}",
         ]
         return RunConfig(
             inputs=list(self.inputs),
@@ -145,6 +183,10 @@ class GuiState:
             command_line=settings,
             tool_name=TOOL_NAME,
             tool_version=__version__,
+            jurisdiction=self.jurisdiction,
+            tsa_url=self.tsa_url if self.timestamp else None,
+            sign_cert=Path(self.sign_cert) if self.sign_cert else None,
+            sign_password=self.sign_password or None,
         )
 
     def start(self) -> None:

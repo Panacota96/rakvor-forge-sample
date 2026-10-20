@@ -1,9 +1,10 @@
 <!doctype html>
 <html lang="{{ lang }}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ t.title_technical }} — {{ item.file_name }}</title><style>{{ css|safe }}</style></head>
-<body><main>
+<body><div class="band"><div class="inner">{{ logo_svg|safe }}<div><div class="word">RAKVOR</div><div class="desc">{{ brand.descriptor }}</div></div></div></div>
+<main>
 <header>
-  <div><div class="mark">RAKVOR · FORENSICS</div><h1>{{ t.title_technical }}</h1><div>{{ item.file_name }}</div></div>
+  <div><h1>{{ t.title_technical }}</h1><div>{{ item.file_name }}</div></div>
   <div class="meta">
     <div>{{ t.run_id }}: <strong>{{ run.run_id }}</strong></div>
     <div>{{ t.item }} #{{ item.index }}</div>
@@ -43,5 +44,5 @@
 
 <h2>{{ t.limitations }}</h2>
 <ul>{% for l in limitations %}<li>{{ l }}</li>{% endfor %}</ul>
-<footer>{{ t.generated_by }} {{ tool.name }} {{ tool.version }} · {{ run.run_id }}</footer>
+<footer><div class="tagline">{{ brand.tagline }}</div>{{ t.generated_by }} {{ tool.name }} {{ tool.version }} · {{ run.run_id }} · {% if signature.signed %}{{ t.signed_by }} {{ signature.by }} (PDF){% else %}{{ t.not_signed }}{% endif %}</footer>
 </main></body></html>

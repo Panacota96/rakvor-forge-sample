@@ -38,9 +38,56 @@ rv-hashinv verify-log rakvor-out/logs/<RUN-ID>          # exit 0 intact, 3 broke
 python tests/verify_chain.py rakvor-out/logs/<RUN-ID>   # independent re-implementation
 ```
 
-> The chain proves the log is **internally consistent**. It does not prove *when* it was written. For that,
-> store the final `entry_hash` (printed in the statistics report) somewhere independent — case management
-> system, e-mail to the client, or an RFC 3161 timestamp — at the end of the run.
+> The chain proves the log is **internally consistent**. On its own it does not prove *when* it was written —
+> that is what the trusted timestamp below adds. Storing the final `entry_hash` (printed in the statistics report)
+> in your case management system remains good practice.
+
+## Trusted timestamp (RFC 3161)
+
+Every run asks a Time-Stamp Authority (TSA) to sign the chain head **just before the statistics report** is
+written, so the report can show the result. Default TSA: `http://timestamp.digicert.com` (`--tsa-url` to change).
+
+```mermaid
+sequenceDiagram
+    participant T as rv-hashinv
+    participant L as audit.jsonl
+    participant A as TSA (RFC 3161)
+    T->>L: … item_reports_written (entry #N)
+    T->>A: SHA-256 of entry #N hash + nonce
+    alt reachable
+        A-->>T: signed token (genTime)
+        T->>L: timestamp_obtained (covers_seq N, gen_time, tsa, token_sha256)
+    else offline
+        T->>L: timestamp_pending (reason) — warning on the statistics report
+        Note over T: later: rv-hashinv timestamp logs/RUN-ID
+    end
+    T->>L: statistics_report_written · run_finished
+```
+
+- The token is stored next to the log: `timestamp-<N>.tsr` (DER) and `timestamp-<N>.json` (readable summary).
+- Offline or air-gapped: the run still completes. When the network is back, `rv-hashinv timestamp <log folder>`
+  re-verifies the chain and appends `timestamp_obtained` — earlier entries are never rewritten.
+- `verify-log` checks each token: imprint = stored head, and entry `#N` still has that hash.
+- Independent check: `openssl ts -verify -digest <head> -in timestamp-<N>.tsr -CAfile <TSA chain>`.
+- `--no-timestamp` (or `RV_NO_TIMESTAMP=1`) disables it; tests use a local TSA (`tests/fake_tsa.py`).
+- **Limitation:** a timestamp proves the log existed at that time, not that its content is true.
+
+## Signed PDF reports
+
+`--sign-cert examiner.p12` (GUI: *4. Trust → Certificate*) signs every PDF — statistics, technical, summary and
+custody — with **your own** certificate. The password comes from the environment variable named by
+`--sign-pass-env` (default `RV_SIGN_PASSWORD`) or an interactive prompt; it is never written to any log.
+The log records `signing_certificate_loaded` with the certificate subject and SHA-256 fingerprint; a wrong password
+stops the run (`run_failed`, exit 1) before any evidence is read. HTML and JSON reports are not signed: their
+digests are in the audit chain, which is timestamped.
+
+## Chain-of-custody form per item
+
+`--jurisdiction co` (default) writes, for each item, a Colombian *registro de cadena de custodia* in Spanish
+(fields of the Fiscalía manual, Ley 906 de 2004); `--jurisdiction fr` a French *fiche de scellé / suivi* in French
+(Code de procédure pénale art. 156 ff.). An English version is always added. The form is pre-filled from the run
+(case, item, size, both digests, UTC times, tool, examiner, audit entries) and leaves signature lines for the
+physical transfers. This is a working aid, not legal advice: check it against the current official form.
 
 ## Actions recorded
 

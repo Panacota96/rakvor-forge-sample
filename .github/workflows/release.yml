@@ -39,6 +39,7 @@ jobs:
       attestations: write
     env:
       TAG: ${{ needs.release-please.outputs.tag || inputs.tag }}
+      SIGN_ENABLED: ${{ secrets.SIGN_PFX_BASE64 != '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,6 +50,23 @@ jobs:
       - run: uv sync --locked --extra gui --group build
       - name: Freeze with Nuitka (standalone folder)
         run: uv run python packaging/build_windows.py
+      - name: Code signing of the executables (runs only when the SIGN_PFX_BASE64 secret exists)
+        if: env.SIGN_ENABLED == 'true'
+        shell: pwsh
+        env:
+          SIGN_PFX_BASE64: ${{ secrets.SIGN_PFX_BASE64 }}
+          SIGN_PFX_PASSWORD: ${{ secrets.SIGN_PFX_PASSWORD }}
+        run: |
+          # OV/EV certificate as base64 PFX in repository secrets. Alternative for the French entity:
+          # Azure Artifact Signing (azure/artifact-signing-action) instead of this step.
+          $pfx = Join-Path $env:RUNNER_TEMP "sign.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGN_PFX_BASE64))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName | Select-Object -Last 1
+          Get-ChildItem dist\rv-hashinv\rv-hashinv.exe, dist\rv-hashinv\rv-hashinv-gui.exe | ForEach-Object {
+            & $signtool.FullName sign /f $pfx /p $env:SIGN_PFX_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $_.FullName
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+          Remove-Item $pfx
       - name: Verify the frozen build before packaging
         shell: pwsh
         run: |
@@ -70,6 +88,23 @@ jobs:
         shell: pwsh
         run: |
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=${{ steps.v.outputs.version }} /DSourceDir=$PWD /O$PWD\dist packaging\windows\installer.iss
+      - name: Code signing of the installer (runs only when the SIGN_PFX_BASE64 secret exists)
+        if: env.SIGN_ENABLED == 'true'
+        shell: pwsh
+        env:
+          SIGN_PFX_BASE64: ${{ secrets.SIGN_PFX_BASE64 }}
+          SIGN_PFX_PASSWORD: ${{ secrets.SIGN_PFX_PASSWORD }}
+        run: |
+          # OV/EV certificate as base64 PFX in repository secrets. Alternative for the French entity:
+          # Azure Artifact Signing (azure/artifact-signing-action) instead of this step.
+          $pfx = Join-Path $env:RUNNER_TEMP "sign.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGN_PFX_BASE64))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName | Select-Object -Last 1
+          Get-ChildItem dist\*-setup.exe | ForEach-Object {
+            & $signtool.FullName sign /f $pfx /p $env:SIGN_PFX_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $_.FullName
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+          Remove-Item $pfx
       - name: SBOM (CycloneDX from the lock file)
         shell: bash
         run: |

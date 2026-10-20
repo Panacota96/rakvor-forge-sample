@@ -7,6 +7,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+- RFC 3161 trusted timestamp of the audit chain head on every run (`--tsa-url`, `--no-timestamp`); offline runs log
+  `timestamp_pending` and `rv-hashinv timestamp <log folder>` adds the token later; `verify-log` checks tokens.
+- PDF reports signed with the examiner's certificate (`--sign-cert`, `--sign-pass-env`); password never logged.
+- Chain-of-custody form per item for Colombia (ES) or France (FR) plus English (`--jurisdiction co|fr`).
+- Rakvor brand on reports, GUI and installer; GUI interface language ES/EN/FR switchable in the window.
+- Code-signing step in the release workflow (runs when the signing secrets are set).
+
+### Fixed
+- Item reports no longer list every duplicate partner (capped at 10), keeping 50k-file runs small.
+
 ## [0.1.0] - 2026-10-19
 
 ### Added

@@ -32,7 +32,15 @@ from .timeutil import human_duration
 SCHEMA_STATISTICS = "rakvor.statistics/1"
 SCHEMA_TECHNICAL = "rakvor.item-technical/1"
 SCHEMA_SUMMARY = "rakvor.item-summary/1"
-LIMITATIONS = ["SIGNATURE_TABLE_LIMITED", "TIMESTAMPS_FROM_FILESYSTEM", "CLEAN_RESULT_IS_NOT_AUTHENTICITY"]
+LIMITATIONS = [
+    "SIGNATURE_TABLE_LIMITED",
+    "TIMESTAMPS_FROM_FILESYSTEM",
+    "CLEAN_RESULT_IS_NOT_AUTHENTICITY",
+    "TIMESTAMP_PROVES_EXISTENCE_ONLY",
+]
+SCHEMA_CUSTODY = "rakvor.item-custody/1"
+JURISDICTIONS = {"co": "es", "fr": "fr"}  # custody form language per country; an English copy is always added
+BLANK_TRANSFER_ROWS = 6
 
 
 @dataclass
@@ -49,6 +57,12 @@ class RunInfo:
     finished_utc: str
     elapsed_ms: int
     cancelled: bool
+    jurisdiction: str = "co"
+    signer: Any = None  # trust.PdfSigner or None
+    timestamp: dict | None = None  # {"status": ok|pending|off, ...}
+
+    def custody_langs(self) -> list[str]:
+        return list(dict.fromkeys([JURISDICTIONS[self.jurisdiction], "en"]))
 
 
 @dataclass
@@ -99,12 +113,18 @@ def _resource(path: str) -> str:
 
 
 _ENV = Environment(autoescape=select_autoescape(["html"]), keep_trailing_newline=True)
-_TEMPLATES = {n: _ENV.from_string(_resource(f"templates/{n}")) for n in ("statistics.html", "technical.html", "summary.html")}
+_TEMPLATES = {n: _ENV.from_string(_resource(f"templates/{n}")) for n in ("statistics.html", "technical.html", "summary.html", "custody.html")}
 _CSS = _resource("templates/report.css")
+_LOGO = _resource("templates/rv-mark.svg")
 
 
 def render_html(template: str, ctx: dict) -> str:
     return _TEMPLATES[template].render(**ctx)
+
+
+def capped_list(names: list[str], limit: int) -> str:
+    """Keeps reports readable at scale: the first `limit` names, then "… (+N)". Full lists stay in hashes.csv/JSON."""
+    return ", ".join(names) if len(names) <= limit else ", ".join(names[:limit]) + f", \u2026 (+{len(names) - limit})"
 
 
 def duplicate_groups(items: list[ItemResult]) -> list[tuple[str, list[int]]]:
@@ -154,7 +174,16 @@ def _base(lang: str, run: RunInfo) -> dict:
             "lang": lang,
         },
         "limitations": [i18n.limitation(lang, code) for code in LIMITATIONS],
+        "brand": i18n.catalog(lang)["brand"],
+        "logo_svg": _LOGO,
+        "signature": {"signed": run.signer is not None, "by": getattr(run.signer, "subject", "")},
+        "timestamp": _timestamp_view(lang, run.timestamp),
     }
+
+
+def _timestamp_view(lang: str, ts: dict | None) -> dict:
+    ts = ts or {"status": "off"}
+    return {**ts, "status_label": i18n.label(lang, f"timestamp_{ts['status']}")}
 
 
 def statistics_context(lang: str, run: RunInfo, items: list[ItemResult], totals: RunTotals, audit: AuditRef) -> dict:
@@ -170,12 +199,13 @@ def statistics_context(lang: str, run: RunInfo, items: list[ItemResult], totals:
                 "errors": totals.errors,
                 "throughput_text": _throughput(totals.bytes, run.elapsed_ms),
             },
-            "severity_rows": [
-                {"key": s, "label": i18n.severity(lang, s), "count": sev.get(s, 0)} for s in ("high", "medium", "low", "info")
-            ],
+            "severity_rows": [{"key": s, "label": i18n.severity(lang, s), "count": sev.get(s, 0)} for s in ("high", "medium", "low", "info")],
             "code_rows": [{"code": c, "title": i18n.finding(lang, c, {})[0], "count": n} for c, n in sorted(codes.items())],
             "type_rows": [{"name": n, "count": c} for n, c in sorted(types.items())],
-            "duplicate_rows": [{"hash": h, "paths": [str(items[i].path) for i in idx]} for h, idx in duplicate_groups(items)],
+            "duplicate_rows": [
+                {"hash": h, "paths": [str(items[i].path) for i in idx[:20]] + ([f"\u2026 (+{len(idx) - 20})"] if len(idx) > 20 else [])}
+                for h, idx in duplicate_groups(items)
+            ],
             "item_rows": [
                 {
                     "index": it.index,
@@ -250,6 +280,8 @@ def _run_json(run: RunInfo) -> dict:
         "finished_utc": run.finished_utc,
         "elapsed_ms": run.elapsed_ms,
         "cancelled": run.cancelled,
+        "jurisdiction": run.jurisdiction,
+        "pdf_signed_by": getattr(run.signer, "subject", None),
     }
 
 
@@ -279,6 +311,7 @@ def statistics_json(run: RunInfo, items: list[ItemResult], totals: RunTotals, au
         ],
         "limitations": LIMITATIONS,
         "audit": {"head": audit.head, "entries": audit.entries, "log_dir": audit.log_dir},
+        "timestamp": run.timestamp or {"status": "off"},
     }
 
 
@@ -332,12 +365,14 @@ def pretty(value: Any) -> bytes:
 
 # ---------- PDF (ReportLab, built from the same view model as HTML) ----------
 
+# Rakvor palette. Pages stay light for printing and court bundles; the brand lives in the header band.
 INK, MUTED, ACCENT, LINE = (
-    colors.HexColor("#101828"),
+    colors.HexColor("#0D1117"),
     colors.HexColor("#475467"),
     colors.HexColor("#2A5CFF"),
     colors.HexColor("#E4E7EC"),
 )
+NIGHT, NIGHT2, VIOLET, CYAN, MIST = (colors.HexColor(c) for c in ("#0D1117", "#1A1F26", "#6B00FF", "#00E5FF", "#E6E6E6"))
 _ST = {
     "brand": ParagraphStyle("brand", fontName="Helvetica-Bold", fontSize=8, textColor=ACCENT, spaceAfter=4),
     "title": ParagraphStyle("title", fontName="Helvetica-Bold", fontSize=18, leading=22, textColor=INK),
@@ -404,6 +439,10 @@ def _render_pdf(make_story, ctx: dict, title_key: str) -> bytes:
         def on_page(canvas, doc):
             total[0] = max(total[0], doc.page) if not final else total[0]
             canvas.saveState()
+            _brand_band(canvas, ctx)
+            canvas.setFont("Helvetica-Oblique", 7)
+            canvas.setFillColor(MUTED)
+            canvas.drawString(18 * mm, 7 * mm, ctx["brand"]["tagline"])
             canvas.setStrokeColor(LINE)
             canvas.line(18 * mm, 15 * mm, A4[0] - 18 * mm, 15 * mm)
             canvas.setFont("Helvetica", 7.5)
@@ -416,7 +455,7 @@ def _render_pdf(make_story, ctx: dict, title_key: str) -> bytes:
             pagesize=A4,
             leftMargin=18 * mm,
             rightMargin=18 * mm,
-            topMargin=18 * mm,
+            topMargin=30 * mm,
             bottomMargin=22 * mm,
             title=t[title_key],
             author=ctx["run"]["actor"],
@@ -430,8 +469,39 @@ def _render_pdf(make_story, ctx: dict, title_key: str) -> bytes:
     return build(final=True)
 
 
+def _brand_band(canvas, ctx: dict) -> None:
+    """Dark Rakvor band with the RV mark (placeholder until the official logo file exists)."""
+    w, h = A4
+    canvas.setFillColor(NIGHT)
+    canvas.rect(0, h - 22 * mm, w, 22 * mm, stroke=0, fill=1)
+    for i, c in enumerate((ACCENT, VIOLET, CYAN)):  # gradient-like rule
+        canvas.setFillColor(c)
+        canvas.rect(i * w / 3, h - 22.8 * mm, w / 3, 0.8 * mm, stroke=0, fill=1)
+    x, y = 18 * mm, h - 18.5 * mm
+    canvas.setStrokeColor(ACCENT)
+    canvas.setLineWidth(1.2)
+    canvas.setFillColor(NIGHT2)
+    canvas.roundRect(x, y, 15 * mm, 15 * mm, 3.2 * mm, stroke=1, fill=1)
+    canvas.setFillColor(MIST)
+    canvas.setFont("Helvetica-Bold", 15)
+    canvas.drawCentredString(x + 7.5 * mm, y + 5.2 * mm, "RV")
+    canvas.setFillColor(CYAN)
+    canvas.rect(x + 4 * mm, y + 2.6 * mm, 7 * mm, 0.7 * mm, stroke=0, fill=1)
+    canvas.setFillColor(MIST)
+    canvas.setFont("Helvetica-Bold", 12)
+    canvas.drawString(x + 19 * mm, y + 8.6 * mm, "R A K V O R")
+    canvas.setFillColor(CYAN)
+    canvas.setFont("Helvetica", 7.5)
+    canvas.drawString(x + 19 * mm, y + 3.6 * mm, ctx["brand"]["descriptor"])
+
+
 def _header(ctx: dict, title_key: str, subtitle: str) -> list:
-    return [_p("RAKVOR · FORENSICS", "brand"), _p(ctx["t"][title_key], "title"), _p(subtitle, "sub")]
+    return [_p(ctx["t"][title_key], "title"), _p(subtitle, "sub")]
+
+
+def _signature_row(ctx: dict) -> tuple[str, str]:
+    t, sig = ctx["t"], ctx["signature"]
+    return (t["signature"], f"{t['signed_by']} {sig['by']}" if sig["signed"] else t["not_signed"])
 
 
 def statistics_pdf(ctx: dict) -> bytes:
@@ -478,6 +548,13 @@ def statistics_pdf(ctx: dict) -> bytes:
             )
         )
         s += [_p(t["limitations"], "h"), *_bullets(ctx["limitations"])]
+        ts = ctx["timestamp"]
+        ts_rows = [(t["status"], ts["status_label"])]
+        if ts.get("tsa"):
+            ts_rows.append((t["tsa"], ts["tsa"]))
+        if ts.get("gen_time"):
+            ts_rows += [(t["gen_time"], ts["gen_time"]), (t["covers"], f"#{ts['covers_seq']}"), (t["audit_head"], ts["head"])]
+        s += [_p(t["timestamp"], "h"), _kv(ts_rows), _kv([_signature_row(ctx)])]
         s += [
             _p(t["audit"], "h"),
             _kv(
@@ -496,9 +573,7 @@ def statistics_pdf(ctx: dict) -> bytes:
 def technical_pdf(ctx: dict) -> bytes:
     def story() -> list:
         t, it = ctx["t"], ctx["item"]
-        s = _header(
-            ctx, "title_technical", f"{t['item']} #{it['index']} · {it['file_name']} · {t['run_id']}: {ctx['run']['run_id']}"
-        )
+        s = _header(ctx, "title_technical", f"{t['item']} #{it['index']} · {it['file_name']} · {t['run_id']}: {ctx['run']['run_id']}")
         s.append(
             _kv(
                 [
@@ -532,6 +607,7 @@ def technical_pdf(ctx: dict) -> bytes:
                 [
                     (t["audit_entries"], f"#{it['audit_first_seq']} – #{it['audit_last_seq']}"),
                     (t["log_dir"], ctx["audit"]["log_dir"]),
+                    _signature_row(ctx),
                 ]
             ),
         ]
@@ -556,6 +632,125 @@ def summary_pdf(ctx: dict) -> bytes:
     return _render_pdf(story, ctx, "title_summary")
 
 
+# ---------- Chain-of-custody form (one per item; jurisdiction language + English) ----------
+
+
+def custody_context(lang: str, run: RunInfo, it: ItemResult, audit: AuditRef) -> dict:
+    ctx = item_context(lang, run, it, audit)
+    c = i18n.catalog(lang)["custody"]
+    j = run.jurisdiction
+    ctx["custody"] = {
+        **c,
+        "title": c[f"title_{j}"],
+        "basis": c[f"basis_{j}"],
+        "case_label": c[f"case_{j}"],
+        "evidence_id_label": c[f"evidence_id_{j}"],
+        "evidence_id": f"{run.run_id}-{it.index:05d}",
+        "jurisdiction_label": i18n.catalog(lang)["ui"][f"jur_{j}"],
+        "operation_text": i18n.fill(
+            c["operation_text"],
+            {
+                "tool": run.tool_name,
+                "version": run.tool_version,
+                "run_id": run.run_id,
+                "start": run.started_utc,
+                "end": run.finished_utc,
+                "first": str(it.audit_first_seq),
+                "last": str(it.audit_last_seq),
+            },
+        ),
+        "blank_rows": list(range(BLANK_TRANSFER_ROWS)),
+    }
+    return ctx
+
+
+def custody_json(run: RunInfo, it: ItemResult) -> dict:
+    return {
+        "schema": SCHEMA_CUSTODY,
+        "jurisdiction": run.jurisdiction,
+        "run_id": run.run_id,
+        "case_id": run.case_id,
+        "evidence_id": f"{run.run_id}-{it.index:05d}",
+        "item": {"index": it.index, "path": str(it.path), "file_name": it.file_name, "size": it.size},
+        "hashes": dict(it.hashes),
+        "examiner": run.actor,
+        "operations": [
+            {
+                "tool": run.tool_name,
+                "version": run.tool_version,
+                "start_utc": run.started_utc,
+                "end_utc": run.finished_utc,
+                "audit_first_seq": it.audit_first_seq,
+                "audit_last_seq": it.audit_last_seq,
+            }
+        ],
+        "transfers": [],
+    }
+
+
+def custody_pdf(ctx: dict) -> bytes:
+    def story() -> list:
+        c, it, run, t = ctx["custody"], ctx["item"], ctx["run"], ctx["t"]
+        s = [
+            _p(c["title"], "title"),
+            _p(f"{t['jurisdiction']}: {c['jurisdiction_label']} · {t['run_id']}: {run['run_id']}", "sub"),
+            _p(c["basis"], "note"),
+            Spacer(1, 6),
+        ]
+        s.append(
+            _kv(
+                [
+                    (c["case_label"], run["case_id"] or ""),
+                    (c["evidence_id_label"], c["evidence_id"]),
+                    (c["description"], f"{it['file_name']} · {it['size']} bytes · {it['detected_text']}"),
+                    (c["location"], it["path"]),
+                ]
+            )
+        )
+        s += [_p(c["integrity"], "h"), _kv([(h["algorithm"], h["value"]) for h in ctx["hash_rows"]])]
+        s += [_p(c["operations"], "h"), _p(c["operation_text"]), _kv([(c["examiner"], run["actor"])])]
+        head = [_p(x, "key") for x in (c["date_time"], c["delivered_by"], c["received_by"], c["purpose"], c["condition"])]
+        rows = [head] + [["", "", "", "", ""] for _ in c["blank_rows"]]
+        tbl = Table(rows, colWidths=[28 * mm, 42 * mm, 42 * mm, 28 * mm, 34 * mm], rowHeights=[None] + [12 * mm] * len(c["blank_rows"]))
+        tbl.setStyle(
+            TableStyle(
+                [
+                    ("GRID", (0, 0), (-1, -1), 0.5, MUTED),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F5F7FB")),
+                ]
+            )
+        )
+        s += [_p(c["transfers"], "h"), tbl]
+        obs = Table([[""], [""]], colWidths=[174 * mm], rowHeights=[12 * mm, 12 * mm])
+        obs.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.5, MUTED)]))
+        s += [_p(c["observations"], "h"), obs, Spacer(1, 16)]
+        sig = Table(
+            [[f"{c['examiner']}: {run['actor']}", c["received_by"]], [c["signature_line"], c["signature_line"]]],
+            colWidths=[87 * mm, 87 * mm],
+            rowHeights=[None, 14 * mm],
+        )
+        sig.setStyle(
+            TableStyle(
+                [
+                    ("LINEABOVE", (0, 1), (-1, 1), 0.6, INK),
+                    ("VALIGN", (0, 0), (-1, -1), "BOTTOM"),
+                    ("FONT", (0, 0), (-1, -1), "Helvetica", 8.5),
+                    ("TEXTCOLOR", (0, 1), (-1, 1), MUTED),
+                ]
+            )
+        )
+        s.append(KeepTogether([sig]))
+        return s
+
+    return _render_pdf(story, ctx, "custody")
+
+
+def _finish_pdf(run: RunInfo, data: bytes, reason: str) -> bytes:
+    """Signs the PDF with the examiner's certificate when one was given."""
+    return run.signer.sign(data, reason=reason) if run.signer is not None else data
+
+
 # ---------- Writing ----------
 
 
@@ -578,8 +773,20 @@ def write_item_reports(directory: Path, run: RunInfo, it: ItemResult, audit: Aud
         ctx = item_context(lang, run, it, audit)
         put(write_hashed(directory, f"technical.{lang}.html", render_html("technical.html", ctx).encode("utf-8"), run.algorithms))
         put(write_hashed(directory, f"summary.{lang}.html", render_html("summary.html", ctx).encode("utf-8"), run.algorithms))
-        put(write_hashed(directory, f"technical.{lang}.pdf", technical_pdf(ctx), run.algorithms))
-        put(write_hashed(directory, f"summary.{lang}.pdf", summary_pdf(ctx), run.algorithms))
+        put(
+            write_hashed(
+                directory,
+                f"technical.{lang}.pdf",
+                _finish_pdf(run, technical_pdf(ctx), ctx["t"]["title_technical"]),
+                run.algorithms,
+            )
+        )
+        put(write_hashed(directory, f"summary.{lang}.pdf", _finish_pdf(run, summary_pdf(ctx), ctx["t"]["title_summary"]), run.algorithms))
+    put(write_hashed(directory, "custody.json", pretty(custody_json(run, it)), run.algorithms))
+    for lang in run.custody_langs():
+        ctx = custody_context(lang, run, it, audit)
+        put(write_hashed(directory, f"custody.{lang}.html", render_html("custody.html", ctx).encode("utf-8"), run.algorithms))
+        put(write_hashed(directory, f"custody.{lang}.pdf", _finish_pdf(run, custody_pdf(ctx), ctx["custody"]["title"]), run.algorithms))
     return files
 
 
@@ -588,12 +795,7 @@ def write_statistics(directory: Path, run: RunInfo, items: list[ItemResult], tot
     files = dict([write_hashed(directory, "statistics.json", pretty(statistics_json(run, items, totals, audit)), run.algorithms)])
     for lang in run.langs:
         ctx = statistics_context(lang, run, items, totals, audit)
-        files.update(
-            [
-                write_hashed(
-                    directory, f"statistics.{lang}.html", render_html("statistics.html", ctx).encode("utf-8"), run.algorithms
-                )
-            ]
-        )
-        files.update([write_hashed(directory, f"statistics.{lang}.pdf", statistics_pdf(ctx), run.algorithms)])
+        files.update([write_hashed(directory, f"statistics.{lang}.html", render_html("statistics.html", ctx).encode("utf-8"), run.algorithms)])
+        pdf = _finish_pdf(run, statistics_pdf(ctx), ctx["t"]["title_statistics"])
+        files.update([write_hashed(directory, f"statistics.{lang}.pdf", pdf, run.algorithms)])
     return files

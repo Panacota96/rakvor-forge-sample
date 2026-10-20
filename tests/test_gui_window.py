@@ -34,7 +34,12 @@ def test_window_runs_a_review(qapp, tmp_path, sample):
     assert w.list.count() == 1
     w.algo_boxes["blake3"].click()
     assert not w.algo_boxes["md5"].isEnabled(), "third algorithm must be disabled"
-    w.lang.setCurrentIndex(1)  # Español
+    w.lang.setCurrentIndex(1)  # report language: Español
+    w.ui_lang.setCurrentIndex(2)  # interface language: Français
+    assert w.btn_start.text() == "Lancer l'analyse" and w.ev_box.title().startswith("1. Éléments")
+    w.ui_lang.setCurrentIndex(1)  # Español
+    assert w.btn_start.text() == "Iniciar revisión"
+    w.chk_ts.setChecked(False)  # tests run offline: no timestamp
     w.out_edit.setText(str(tmp_path / "out"))
     assert w.btn_start.isEnabled()
     w.btn_start.click()
@@ -42,6 +47,8 @@ def test_window_runs_a_review(qapp, tmp_path, sample):
     assert w.state.phase == "finished", w.state.error
     assert w.state.outcome.items == 3 and w.btn_report.isVisible()
     assert w.state.outcome.report.name == "statistics.es.html" and w.state.outcome.report.is_file()
+    log = (w.state.outcome.log_dir / "audit.jsonl").read_text("utf-8")
+    assert '"ui_interface_language_changed"' in log and '"ui_timestamp_changed"' in log
     if os.environ.get("RV_SCREENSHOT"):
         w.grab().save(os.environ["RV_SCREENSHOT"])
     w.close()

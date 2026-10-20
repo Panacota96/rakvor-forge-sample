@@ -11,9 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def cli(*args, **kw) -> subprocess.CompletedProcess:
     env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
-    return subprocess.run(
-        [sys.executable, "-m", "rv_hashinv", *map(str, args)], capture_output=True, text=True, encoding="utf-8", env=env, **kw
-    )
+    return subprocess.run([sys.executable, "-m", "rv_hashinv", *map(str, args)], capture_output=True, text=True, encoding="utf-8", env=env, **kw)
 
 
 def only_dir(p: Path) -> Path:

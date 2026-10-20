@@ -5,6 +5,7 @@ arguments, renders events (progress bar or JSON Lines) and maps results to exit 
 from __future__ import annotations
 
 import json
+import os
 import signal
 import sys
 import threading
@@ -24,11 +25,12 @@ from rich.progress import (
 
 from . import TOOL_NAME, __version__
 from .core import RunConfig, run
-from .core.audit import verify
+from .core.audit import AuditLog, heads, verify
 from .core.envinfo import os_user
 from .core.hashing import ALGORITHMS, KNOWN_ANSWERS, parse, self_test, validate_selection
 from .core.i18n import parse_langs
 from .core.timeutil import human_duration
+from .core.trust import DEFAULT_TSA, TimestampError, timestamp_head, verify_timestamps
 
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_FINDINGS, EXIT_CANCELLED = 0, 1, 2, 3, 130
 HELP_WIDTH = 100
@@ -73,6 +75,8 @@ FILES WRITTEN:
   <OUT>/reports/<RUN-ID>/statistics.json  Run statistics (+ statistics.<LANG>.html and .pdf).
   <OUT>/reports/<RUN-ID>/items/<NNNNN>-<NAME>/technical.json|.<LANG>.html|.<LANG>.pdf
   <OUT>/reports/<RUN-ID>/items/<NNNNN>-<NAME>/summary.json|.<LANG>.html|.<LANG>.pdf
+  <OUT>/reports/<RUN-ID>/items/<NNNNN>-<NAME>/custody.json|.<es|fr>.html|.pdf|.en.html|.pdf
+  <OUT>/logs/<RUN-ID>/timestamp-<SEQ>.tsr|.json  RFC 3161 token for the audit chain head.
 
 \b
 FORENSIC NOTES:
@@ -81,7 +85,10 @@ FORENSIC NOTES:
   - Each audit entry stores the SHA-256 of the previous one; editing, deleting or re-ordering any
     line is detected by `verify-log`. Keep the log folder with the reports.
   - A file without findings is not proven authentic; read the Limitations section of each report.
-  - MD5 and SHA-1 are accepted for compatibility with older case files; pair them with SHA-256 or BLAKE3."""
+  - MD5 and SHA-1 are accepted for compatibility with older case files; pair them with SHA-256 or BLAKE3.
+  - The chain head is timestamped by an RFC 3161 authority (proves when the log existed). Offline? The run
+    finishes with `timestamp_pending`; run `rv-hashinv timestamp <LOG>` later.
+  - With --sign-cert every PDF is signed with the examiner's certificate; the password is never logged."""
 
 CONTEXT = {"help_option_names": ["-h", "--help"], "max_content_width": HELP_WIDTH, "terminal_width": HELP_WIDTH}
 
@@ -122,8 +129,7 @@ def cli() -> None:
     type=click.Path(path_type=Path),
     metavar="FILE",
     help=_opt_help(
-        "Text file with one path per line (bulk review). Lines starting with # are ignored. Relative "
-        "paths are resolved from the list file's folder.",
+        "Text file with one path per line (bulk review). Lines starting with # are ignored. Relative paths are resolved from the list file's folder.",
         "none",
         "--input-list case-014-files.txt",
     ),
@@ -132,9 +138,7 @@ def cli() -> None:
     "-r",
     "--recursive",
     is_flag=True,
-    help=_opt_help(
-        "Also review files in subfolders.", "off (only the first level of each folder)", "-i D:\\evidence --recursive"
-    ),
+    help=_opt_help("Also review files in subfolders.", "off (only the first level of each folder)", "-i D:\\evidence --recursive"),
 )
 @click.option(
     "-H",
@@ -156,9 +160,7 @@ def cli() -> None:
     default=Path("rakvor-out"),
     show_default=False,
     metavar="DIR",
-    help=_opt_help(
-        "Folder where logs/ and reports/ are created. Created if missing.", "./rakvor-out", "--out E:\\case-014\\rv-hashinv"
-    ),
+    help=_opt_help("Folder where logs/ and reports/ are created. Created if missing.", "./rakvor-out", "--out E:\\case-014\\rv-hashinv"),
 )
 @click.option(
     "-l",
@@ -175,9 +177,7 @@ def cli() -> None:
     "-a",
     "--actor",
     metavar="NAME",
-    help=_opt_help(
-        "Name of the examiner, written in every audit entry and report.", "the operating-system user name", '--actor "Ana Ruiz"'
-    ),
+    help=_opt_help("Name of the examiner, written in every audit entry and report.", "the operating-system user name", '--actor "Ana Ruiz"'),
 )
 @click.option(
     "-c",
@@ -199,8 +199,65 @@ def cli() -> None:
         "--progress jsonl",
     ),
 )
+@click.option(
+    "-j",
+    "--jurisdiction",
+    type=click.Choice(["co", "fr"]),
+    default="co",
+    metavar="CC",
+    help=_opt_help(
+        "Chain-of-custody form per item: co (Colombia, Fiscalía style, Spanish) or fr (France, scellés, French); an English copy is always added.",
+        "co",
+        "--jurisdiction fr",
+    ),
+)
+@click.option(
+    "--tsa-url",
+    default=DEFAULT_TSA,
+    metavar="URL",
+    help=_opt_help("RFC 3161 time-stamping authority for the audit chain head.", DEFAULT_TSA, "--tsa-url https://freetsa.org/tsr"),
+)
+@click.option(
+    "--no-timestamp",
+    is_flag=True,
+    envvar="RV_NO_TIMESTAMP",
+    help=_opt_help("Do not request a trusted timestamp (offline labs).", "off (a timestamp is requested)", "--no-timestamp"),
+)
+@click.option(
+    "--sign-cert",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    metavar="P12",
+    help=_opt_help(
+        "Examiner's certificate (.p12/.pfx) used to sign every PDF report. The password is read from the "
+        "environment variable named by --sign-pass-env, or asked for interactively.",
+        "none (PDFs are not signed)",
+        "--sign-cert C:\\certs\\ana-ruiz.p12",
+    ),
+)
+@click.option(
+    "--sign-pass-env",
+    default="RV_SIGN_PASSWORD",
+    metavar="VAR",
+    help=_opt_help("Environment variable holding the certificate password.", "RV_SIGN_PASSWORD", "--sign-pass-env CERT_PASS"),
+)
 @click.pass_context
-def scan(ctx, inputs, input_list, recursive, hashes, out, lang, actor, case_id, progress_mode) -> None:
+def scan(
+    ctx,
+    inputs,
+    input_list,
+    recursive,
+    hashes,
+    out,
+    lang,
+    actor,
+    case_id,
+    progress_mode,
+    jurisdiction,
+    tsa_url,
+    no_timestamp,
+    sign_cert,
+    sign_pass_env,
+) -> None:
     algos: list[str] = []
     for h in (x for raw in (hashes or ("sha256",)) for x in raw.split(",") if x.strip()):
         a = parse(h)
@@ -230,6 +287,10 @@ def scan(ctx, inputs, input_list, recursive, hashes, out, lang, actor, case_id, 
         command_line=sys.argv,
         tool_name=TOOL_NAME,
         tool_version=__version__,
+        jurisdiction=jurisdiction,
+        tsa_url=None if no_timestamp else tsa_url,
+        sign_cert=sign_cert,
+        sign_password=_password(sign_cert, sign_pass_env),
     )
 
     err = Console(stderr=True)
@@ -267,6 +328,8 @@ def scan(ctx, inputs, input_list, recursive, hashes, out, lang, actor, case_id, 
                 bar.console.print(f"warning: {e['path']}: {e['message']}")
             elif kind == "cancelled":
                 bar.console.print("cancelled: writing partial reports...")
+            elif kind == "timestamp" and e["status"] != "ok":
+                bar.console.print(f"warning: timestamp pending ({e.get('reason')}); run `rv-hashinv timestamp` later")
 
     try:
         s = run(cfg, sink, cancel)
@@ -284,6 +347,7 @@ def scan(ctx, inputs, input_list, recursive, hashes, out, lang, actor, case_id, 
                 f"{status}  run {s.run_id}\n"
                 f"  items: {s.items}  bytes: {s.bytes}  errors: {s.errors}  elapsed: {human_duration(s.elapsed_ms)}\n"
                 f"  findings: high {s.high}, medium {s.medium}, low {s.low}, info {s.info}\n"
+                f"  timestamp: {s.timestamp['status']}{' ' + s.timestamp.get('gen_time', '') if s.timestamp['status'] == 'ok' else ''}\n"
                 f"  report: {s.report_dir / f'statistics.{langs[0]}.html'}\n  logs:   {s.log_dir}"
             )
         except OSError:
@@ -313,13 +377,63 @@ def verify_log(ctx, log: Path) -> None:
     except OSError as e:
         click.echo(f"error: cannot open {path}: {e}", err=True)
         ctx.exit(EXIT_ERROR)
+    problems += verify_timestamps(path.parent, heads(path)) if not problems else []
+    stamps = sorted(path.parent.glob("timestamp-*.json"))
     if not problems:
         click.echo(f"OK  {n} entries, chain intact: {path}")
+        for st in stamps:
+            m = json.loads(st.read_text(encoding="utf-8"))
+            click.echo(f"    timestamp {m['gen_time']} by {m['tsa']} covers entry #{m['covers_seq']}")
         ctx.exit(EXIT_OK)
     click.echo(f"BROKEN  {path}")
     for p in problems:
         click.echo(f"  - {p}")
     ctx.exit(EXIT_FINDINGS)
+
+
+@cli.command(
+    "timestamp",
+    short_help="Add an RFC 3161 timestamp to a finished run (e.g. after working offline).",
+    epilog="\b\nEXAMPLES:\n  rv-hashinv timestamp rakvor-out/logs/20261019T101500Z-a1b2c3\n"
+    "  rv-hashinv timestamp rakvor-out/logs/20261019T101500Z-a1b2c3 --tsa-url https://freetsa.org/tsr\n\n\b\nEXIT CODES:\n"
+    "  0  Timestamp obtained and logged.\n  1  The TSA could not be reached (nothing changed; try again).\n"
+    "  3  The log is broken: no timestamp is added to a broken chain.",
+)
+@click.argument("log", type=click.Path(path_type=Path, exists=True), metavar="LOG")
+@click.option(
+    "--tsa-url",
+    default=DEFAULT_TSA,
+    metavar="URL",
+    help=_opt_help("RFC 3161 time-stamping authority.", DEFAULT_TSA, "--tsa-url https://freetsa.org/tsr"),
+)
+@click.option(
+    "-a",
+    "--actor",
+    metavar="NAME",
+    help=_opt_help("Name written in the new audit entry.", "the operating-system user name", '--actor "Ana Ruiz"'),
+)
+@click.pass_context
+def timestamp_cmd(ctx, log: Path, tsa_url: str, actor: str | None) -> None:
+    """Add an RFC 3161 timestamp of the current audit chain head to a finished run.
+
+    LOG is the run's log folder (or its audit.jsonl). Example: rakvor-out/logs/20261019T101500Z-a1b2c3
+    """
+    d = log.parent if log.is_file() else log
+    try:
+        audit = AuditLog.resume(d, actor or os_user())
+    except ValueError as e:
+        click.echo(f"error: {e}", err=True)
+        ctx.exit(EXIT_FINDINGS)
+    try:
+        ts = timestamp_head(d, audit.seq, audit.head, tsa_url)
+    except TimestampError as e:
+        audit.close()
+        click.echo(f"error: {e}", err=True)
+        ctx.exit(EXIT_ERROR)
+    audit.record("timestamp_obtained", ts.file, ts.to_json())
+    audit.close()
+    click.echo(f"OK  timestamp {ts.gen_time} by {ts.tsa} covers entry #{ts.covers_seq}")
+    ctx.exit(EXIT_OK)
 
 
 @cli.command(
@@ -346,18 +460,27 @@ def docs_cli() -> None:
 
 def docs_markdown() -> str:
     out = [
-        "# Command-line reference\n\n"
-        "<!-- Generated by `rv-hashinv docs-cli`. Do not edit by hand: CI fails if this file differs. -->\n\n",
-        "```mermaid\nflowchart LR\n  A[rv-hashinv] --> B[scan]\n  A --> C[verify-log]\n  A --> D[self-test]\n"
+        "# Command-line reference\n\n<!-- Generated by `rv-hashinv docs-cli`. Do not edit by hand: CI fails if this file differs. -->\n\n",
+        "```mermaid\nflowchart LR\n  A[rv-hashinv] --> B[scan]\n  A --> C[verify-log]\n  A --> D[self-test]\n  A --> T[timestamp]\n  T --> E\n"
         "  B --> E[(logs/RUN-ID)]\n  B --> F[(reports/RUN-ID)]\n  C --> E\n```\n\n",
     ]
     root = click.Context(cli, info_name=TOOL_NAME, **{k: v for k, v in CONTEXT.items() if k != "help_option_names"})
     out.append(f"## rv-hashinv\n\n```text\n{cli.get_help(root).rstrip()}\n```\n\n")
-    for name in ("scan", "verify-log", "self-test"):
+    for name in ("scan", "verify-log", "timestamp", "self-test"):
         cmd = cli.commands[name]
         sub = click.Context(cmd, info_name=name, parent=root, **{k: v for k, v in CONTEXT.items() if k != "help_option_names"})
         out.append(f"## rv-hashinv {name}\n\n```text\n{cmd.get_help(sub).rstrip()}\n```\n\n")
     return "".join(out)
+
+
+def _password(cert: Path | None, env: str) -> str | None:
+    if cert is None:
+        return None
+    if os.environ.get(env) is not None:
+        return os.environ[env]
+    if sys.stdin.isatty():
+        return click.prompt(f"Password for {cert.name}", hide_input=True, default="", show_default=False) or None
+    return None
 
 
 def _usage(msg: str) -> None:
