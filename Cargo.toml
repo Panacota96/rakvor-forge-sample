@@ -3,7 +3,9 @@ resolver = "3"
 members = ["src/core", "src/cli", "src/gui"]
 
 [workspace.package]
-version = "0.2.0"
+# Crate version only — never bumped. The product version is version.txt (release-please), so Cargo.lock
+# does not change on release and `--locked` builds keep working.
+version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 rust-version = "1.85"

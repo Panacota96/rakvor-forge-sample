@@ -74,7 +74,7 @@ jobs:
         id: v
         shell: pwsh
         run: |
-          $v = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages | Where-Object name -eq 'rv-hashinv-cli' | Select-Object -ExpandProperty version
+          $v = (Get-Content version.txt -Raw).Trim()
           "version=$v" >> $env:GITHUB_OUTPUT
       - name: Portable zip
         shell: pwsh

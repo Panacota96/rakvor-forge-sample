@@ -5,14 +5,7 @@
   "packages": {
     ".": {
       "package-name": "rv-hashinv",
-      "changelog-path": "CHANGELOG.md",
-      "extra-files": [
-        {
-          "type": "toml",
-          "path": "Cargo.toml",
-          "jsonpath": "$.workspace.package.version"
-        }
-      ]
+      "changelog-path": "CHANGELOG.md"
     }
   }
 }

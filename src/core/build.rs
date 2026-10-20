@@ -17,6 +17,16 @@ fn main() {
     }
     println!("cargo:rustc-env=RV_DEPENDENCIES={}", deps.join(","));
 
+    // Product version: version.txt is the single source of truth (release-please bumps it).
+    let vfile = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../version.txt");
+    println!("cargo:rerun-if-changed={}", vfile.display());
+    let product = fs::read_to_string(&vfile)
+        .map(|v| v.trim().to_string())
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| env::var("CARGO_PKG_VERSION").unwrap_or_default());
+    println!("cargo:rustc-env=RV_VERSION={product}");
+
     let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".into());
     let version = std::process::Command::new(rustc)
         .arg("--version")
