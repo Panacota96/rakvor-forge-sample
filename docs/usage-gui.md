@@ -1,0 +1,51 @@
+# Using the desktop app (Windows 10/11)
+
+Start **RV HashInv** from the Start menu (installer) or double-click `rv-hashinv-gui.exe` (portable zip).
+No installation of other software is required (Python and Qt are bundled by Nuitka).
+
+![Main window](images/gui-main.png)
+
+## Workflow
+
+```mermaid
+flowchart TD
+    A["1 · Evidence<br/>Add files… / Add folder… / drag & drop / type a path"] --> B
+    B["2 · Hash algorithms<br/>tick 1 or 2 (a third box is disabled)"] --> C
+    C["3 · Reports<br/>language · output folder · examiner · case ID"] --> D
+    D["Start review"] --> E{"Running"}
+    E -->|progress bar, elapsed, remaining| E
+    E -->|Cancel| F["Partial reports + run_cancelled in the log"]
+    E -->|done| G["Open report · Open log folder"]
+```
+
+## The window
+
+| Area | What it does |
+| --- | --- |
+| **1. Evidence** | *Add files…* and *Add folder…* open the file pickers. You can also drag files or folders onto the window (or onto the `rv-hashinv-gui.exe` icon before it starts), or paste a path and press Enter. *Include subfolders* is on by default. Select entries and press **Remove selected**. |
+| **2. Hash algorithms** | Tick one or two. When two are ticked, the others are disabled; you cannot untick the last one. |
+| **3. Reports** | Language (English, Español, Français, or all three), output folder, examiner name (defaults to your Windows user), optional case ID. |
+| **Start review / Cancel** | Start is enabled once evidence is added. During a run the settings are locked and the button becomes *Cancel*. |
+| **Progress** | Bar by bytes processed, `files done / total`, elapsed time (always moving) and estimated time remaining. The file being read is shown below. |
+| **Result** | Counts by severity, **Open report** (statistics page in your language) and **Open log folder**. |
+
+## What the GUI records
+
+Your choices are part of the evidence record. Before the run starts, the GUI writes them to the audit log:
+
+| Action | Logged as |
+| --- | --- |
+| Add / remove evidence | `ui_input_added`, `ui_input_removed` |
+| Change hash selection | `ui_hash_selection_changed` |
+| Change language / subfolders | `ui_language_changed`, `ui_recursive_changed` |
+| Press Start | `ui_start_clicked` (final settings) |
+| Press Cancel | `item_cancelled`, `run_cancelled` |
+
+Errors during the run appear in the warnings list and in the log as `item_error`.
+Validation messages shown *before* a run (e.g. "Add at least one file or folder") are not logged, because no run — and
+therefore no log — exists yet.
+
+## Same results as the command line
+
+The GUI calls the same engine as `rv-hashinv scan`. A GUI run with the same evidence, algorithms and language gives
+identical hashes and findings; `environment.json` records `"frontend": "gui"` and the settings used.

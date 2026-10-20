@@ -1,0 +1,8 @@
+RV HashInv
+Copyright 2026 Rakvor
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It includes third-party open-source components; their names and exact versions are
+listed in the SBOM published with every release (sbom.cdx.json) and in each run's
+logs/<RUN-ID>/environment.json.

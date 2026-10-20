@@ -1,0 +1,10 @@
+{
+  "forge_version": 1,
+  "profile": "python",
+  "name": "rv-hashinv",
+  "module": "rv_hashinv",
+  "title": "RV HashInv",
+  "run_command": "scan",
+  "created": "2026-10-19",
+  "cli_command": ["uv", "run", "-q", "rv-hashinv"]
+}

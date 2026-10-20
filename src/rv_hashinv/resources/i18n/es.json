@@ -1,0 +1,101 @@
+{
+  "lang": "es",
+  "labels": {
+    "title_statistics": "Informe estadístico de la ejecución",
+    "title_technical": "Revisión técnica",
+    "title_summary": "Resumen para el cliente",
+    "tool": "Herramienta",
+    "version": "Versión",
+    "run_id": "ID de ejecución",
+    "case": "Caso",
+    "actor": "Perito",
+    "frontend": "Interfaz",
+    "started": "Inicio (UTC)",
+    "finished": "Fin (UTC)",
+    "duration": "Duración",
+    "algorithms": "Algoritmos de hash",
+    "items": "Elementos",
+    "bytes": "Bytes",
+    "errors": "Errores",
+    "throughput": "Velocidad",
+    "by_type": "Elementos por tipo detectado",
+    "findings_by_severity": "Hallazgos por severidad",
+    "findings_by_code": "Hallazgos por tipo",
+    "duplicates": "Grupos de duplicados",
+    "item": "Elemento",
+    "file": "Archivo",
+    "path": "Ruta",
+    "size": "Tamaño (bytes)",
+    "modified": "Última modificación (UTC)",
+    "detected_type": "Tipo detectado (firma)",
+    "extension": "Extensión",
+    "hashes": "Hashes",
+    "findings": "Hallazgos",
+    "severity": "Severidad",
+    "shows": "Lo que muestra",
+    "does_not_prove": "Lo que no demuestra",
+    "status": "Estado",
+    "limitations": "Limitaciones",
+    "audit": "Registro de auditoría",
+    "audit_head": "Cabeza de la cadena de auditoría (SHA-256)",
+    "audit_entries": "Entradas de auditoría",
+    "log_dir": "Carpeta de registros",
+    "report_dir": "Carpeta de informes",
+    "page": "Página",
+    "of": "de",
+    "generated_by": "Generado por",
+    "cancelled_note": "El usuario canceló la ejecución; solo se informan los elementos procesados antes de la cancelación.",
+    "none": "Ninguno",
+    "unknown": "desconocido",
+    "method": "Método",
+    "method_text": "Cada archivo se abrió en modo solo lectura, se calculó su hash en una sola pasada con los algoritmos seleccionados y se comparó con una tabla de firmas de archivo. Cada acción quedó registrada en un log de auditoría encadenado por hashes.",
+    "conclusion": "Conclusión",
+    "what_we_did": "Qué hicimos",
+    "what_we_found": "Qué encontramos",
+    "next_steps": "Siguiente paso recomendado",
+    "next_ok": "No se requiere ninguna acción para este archivo.",
+    "next_attention": "Revise los hallazgos con su perito antes de apoyarse en este archivo.",
+    "next_problem": "No se apoye en este archivo hasta que el perito explique el problema.",
+    "status_ok": "Sin problemas",
+    "status_attention": "Requiere atención",
+    "status_problem": "Problema detectado",
+    "summary_ok": "Se calculó el hash del archivo y se revisó. Las verificaciones aplicadas no encontraron problemas.",
+    "summary_attention": "Se calculó el hash del archivo y se revisó. Algunos puntos requieren atención.",
+    "summary_problem": "El archivo no pudo examinarse por completo o presenta un problema grave.",
+    "fingerprint": "Huella digital",
+    "fingerprint_text": "Esta huella identifica el contenido exacto del archivo. Cualquier cambio, incluso de un solo carácter, produciría un valor diferente."
+  },
+  "severity": { "high": "Alta", "medium": "Media", "low": "Baja", "info": "Informativa" },
+  "findings": {
+    "EMPTY_FILE": {
+      "title": "Archivo vacío",
+      "shows": "El archivo no contiene datos (0 bytes).",
+      "does_not_prove": "No indica si el archivo se vació a propósito o se creó vacío."
+    },
+    "EXTENSION_MISMATCH": {
+      "title": "La extensión no coincide con el contenido",
+      "shows": "El nombre termina en .%{extension}, pero el contenido empieza con la firma de un archivo %{detected}.",
+      "does_not_prove": "Cambiar el nombre es frecuente y a menudo inocente; por sí solo no prueba un intento de ocultar contenido."
+    },
+    "EXECUTABLE_CONTENT": {
+      "title": "Contenido ejecutable con otro nombre",
+      "shows": "El contenido es un programa %{detected}, aunque el nombre termina en .%{extension}.",
+      "does_not_prove": "No demuestra que el programa sea malicioso; debe analizarse en un entorno aislado."
+    },
+    "DUPLICATE": {
+      "title": "Contenido duplicado",
+      "shows": "El mismo contenido (mismo %{algorithm}) aparece en %{count} archivos: %{others}.",
+      "does_not_prove": "Hashes idénticos muestran contenido idéntico, no quién copió el archivo ni cuándo."
+    },
+    "UNREADABLE": {
+      "title": "No se pudo leer el archivo",
+      "shows": "La lectura falló: %{error}.",
+      "does_not_prove": "No demuestra que el archivo esté dañado; permisos o bloqueos pueden causarlo."
+    }
+  },
+  "limitations": {
+    "SIGNATURE_TABLE_LIMITED": "La detección de tipo usa una tabla limitada de firmas comunes; los tipos desconocidos se reportan como desconocidos, no como sospechosos.",
+    "TIMESTAMPS_FROM_FILESYSTEM": "Las fechas de modificación provienen del sistema de archivos de la copia examinada y pueden diferir de la fuente original.",
+    "CLEAN_RESULT_IS_NOT_AUTHENTICITY": "Un resultado sin hallazgos no prueba que un archivo sea auténtico ni que no haya sido alterado antes de su adquisición."
+  }
+}

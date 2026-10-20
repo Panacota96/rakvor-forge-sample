@@ -1,0 +1,9 @@
+/.venv/
+__pycache__/
+*.pyc
+/dist/
+/build/
+/rakvor-out/
+/examples/sample/out/
+*.build/
+*.dist/
