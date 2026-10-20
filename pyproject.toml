@@ -1,6 +1,8 @@
 [project]
 name = "rv-hashinv"
-version = "0.1.0"
+# Product version lives in src/rv_hashinv/__init__.py (release-please bumps it); dynamic so uv.lock never
+# changes on release and `uv sync --locked` keeps working.
+dynamic = ["version"]
 description = "Evidence inventory for digital forensics: dual hashing, hash-chained audit log, per-item technical and customer reports."
 readme = "README.md"
 license = "Apache-2.0"
@@ -39,6 +41,9 @@ build = ["nuitka>=2.4", "ordered-set>=4.1", "zstandard>=0.22"]
 [build-system]
 requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/rv_hashinv/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/rv_hashinv"]
