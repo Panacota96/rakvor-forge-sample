@@ -51,6 +51,12 @@ pub enum Event {
         path: Option<String>,
         message: String,
     },
+    Timestamp {
+        status: String,
+        tsa: String,
+        gen_time: Option<String>,
+        reason: Option<String>,
+    },
     Cancelled {
         done: u64,
         elapsed_ms: u64,

@@ -3,6 +3,7 @@
 
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use rv_hashinv_core::trust::{self, DEFAULT_TSA};
 use rv_hashinv_core::{
     Event, HashAlgo, RunConfig, TOOL_NAME, TOOL_VERSION, audit, hash, i18n, run,
 };
@@ -57,6 +58,8 @@ FILES WRITTEN:
   <OUT>/reports/<RUN-ID>/statistics.json  Run statistics (+ statistics.<LANG>.html and .pdf).
   <OUT>/reports/<RUN-ID>/items/<NNNNN>-<NAME>/technical.json|.<LANG>.html|.<LANG>.pdf   Technical review.
   <OUT>/reports/<RUN-ID>/items/<NNNNN>-<NAME>/summary.json|.<LANG>.html|.<LANG>.pdf     Customer summary.
+  <OUT>/reports/<RUN-ID>/items/<NNNNN>-<NAME>/custody.json|.<es|fr>.html|.pdf|.en.html|.pdf  Custody form.
+  <OUT>/logs/<RUN-ID>/timestamp-<SEQ>.tsr|.json  RFC 3161 token for the audit chain head.
 
 FORENSIC NOTES:
   - Evidence is opened read-only and never modified; modification times are compared before and after.
@@ -64,7 +67,10 @@ FORENSIC NOTES:
   - Each audit entry stores the SHA-256 of the previous one; editing, deleting or re-ordering any
     line is detected by `verify-log`. Keep the log folder with the reports.
   - A file without findings is not proven authentic; read the Limitations section of each report.
-  - MD5 and SHA-1 are accepted for compatibility with older case files; pair them with SHA-256 or BLAKE3.";
+  - MD5 and SHA-1 are accepted for compatibility with older case files; pair them with SHA-256 or BLAKE3.
+  - The chain head is timestamped by an RFC 3161 authority (proves when the log existed). Offline? The run
+    finishes with `timestamp_pending`; run `rv-hashinv timestamp <LOG>` later.
+  - With --sign-cert every PDF is signed with the examiner's certificate; the password is never logged.";
 
 #[derive(Parser)]
 #[command(name = TOOL_NAME, version = TOOL_VERSION, about = ABOUT, long_about = LONG_ABOUT, max_term_width = 100,
@@ -104,6 +110,32 @@ EXIT CODES:
   0  All algorithms give the published answer for the input \"abc\".
   1  At least one algorithm failed: do not use this build for evidence.")]
     SelfTest,
+    /// Add an RFC 3161 timestamp to a finished run (e.g. after working offline).
+    #[command(after_long_help = "\
+EXAMPLES:
+  rv-hashinv timestamp rakvor-out/logs/20261019T101500Z-a1b2c3
+  rv-hashinv timestamp rakvor-out/logs/20261019T101500Z-a1b2c3 --tsa-url https://freetsa.org/tsr
+
+EXIT CODES:
+  0  Timestamp obtained and logged.
+  1  The TSA could not be reached (nothing changed; try again).
+  3  The log is broken: no timestamp is added to a broken chain.")]
+    Timestamp {
+        /// The run's log folder (or its audit.jsonl).
+        ///
+        /// Example: rakvor-out/logs/20261019T101500Z-a1b2c3
+        log: PathBuf,
+        /// RFC 3161 time-stamping authority.
+        /// Default: http://timestamp.digicert.com
+        /// Example: --tsa-url https://freetsa.org/tsr
+        #[arg(long, value_name = "URL", default_value = DEFAULT_TSA, verbatim_doc_comment, hide_default_value = true)]
+        tsa_url: String,
+        /// Name written in the new audit entry.
+        /// Default: the operating-system user name
+        /// Example: --actor "Ana Ruiz"
+        #[arg(short, long, value_name = "NAME", verbatim_doc_comment)]
+        actor: Option<String>,
+    },
     /// Print the full help of every command as Markdown (used to generate docs/usage-cli.md).
     #[command(hide = true)]
     DocsCli,
@@ -215,6 +247,44 @@ struct ScanArgs {
         hide_default_value = true
     )]
     progress: ProgressMode,
+
+    /// Chain-of-custody form per item: co (Colombia, Fiscalía style, Spanish) or fr (France, scellés, French).
+    /// An English copy is always added.
+    /// Default: co
+    /// Example: --jurisdiction fr
+    #[arg(short, long, value_name = "CC", default_value = "co", value_parser = ["co", "fr"], verbatim_doc_comment, hide_default_value = true, hide_possible_values = true)]
+    jurisdiction: String,
+
+    /// RFC 3161 time-stamping authority for the audit chain head.
+    /// Default: http://timestamp.digicert.com
+    /// Example: --tsa-url https://freetsa.org/tsr
+    #[arg(long, value_name = "URL", default_value = DEFAULT_TSA, verbatim_doc_comment, hide_default_value = true)]
+    tsa_url: String,
+
+    /// Do not request a trusted timestamp (offline labs). Also set by RV_NO_TIMESTAMP=1.
+    /// Default: off (a timestamp is requested)
+    /// Example: --no-timestamp
+    #[arg(long, env = "RV_NO_TIMESTAMP", value_parser = clap::builder::FalseyValueParser::new(), verbatim_doc_comment, hide_env = true)]
+    no_timestamp: bool,
+
+    /// Examiner's certificate (.p12/.pfx, RSA) used to sign every PDF report. The password is read from
+    /// the environment variable named by --sign-pass-env, or asked for interactively.
+    /// Default: none (PDFs are not signed)
+    /// Example: --sign-cert C:\certs\ana-ruiz.p12
+    #[arg(long, value_name = "P12", verbatim_doc_comment)]
+    sign_cert: Option<PathBuf>,
+
+    /// Environment variable holding the certificate password.
+    /// Default: RV_SIGN_PASSWORD
+    /// Example: --sign-pass-env CERT_PASS
+    #[arg(
+        long,
+        value_name = "VAR",
+        default_value = "RV_SIGN_PASSWORD",
+        verbatim_doc_comment,
+        hide_default_value = true
+    )]
+    sign_pass_env: String,
 }
 
 fn main() -> ExitCode {
@@ -223,6 +293,11 @@ fn main() -> ExitCode {
         Command::Scan(a) => scan(a),
         Command::VerifyLog { log } => verify_log(log),
         Command::SelfTest => self_test(),
+        Command::Timestamp {
+            log,
+            tsa_url,
+            actor,
+        } => timestamp(log, tsa_url, actor),
         Command::DocsCli => {
             print!("{}", docs_cli());
             EXIT_OK
@@ -277,6 +352,17 @@ fn scan(a: ScanArgs) -> u8 {
         command_line: std::env::args().collect(),
         tool_name: TOOL_NAME.into(),
         tool_version: TOOL_VERSION.into(),
+        jurisdiction: a.jurisdiction.clone(),
+        tsa_url: if a.no_timestamp {
+            None
+        } else {
+            Some(a.tsa_url.clone())
+        },
+        sign_password: a
+            .sign_cert
+            .as_ref()
+            .and_then(|_| password(&a.sign_pass_env)),
+        sign_cert: a.sign_cert.clone(),
     };
 
     let bar = match a.progress {
@@ -325,6 +411,10 @@ fn scan(a: ScanArgs) -> u8 {
                     message
                 )),
                 Event::Cancelled { .. } => b.println("cancelled: writing partial reports..."),
+                Event::Timestamp { status, reason, .. } if status != "ok" => b.println(format!(
+                    "warning: timestamp pending ({}); run `rv-hashinv timestamp` later",
+                    reason.as_deref().unwrap_or("-")
+                )),
                 _ => {}
             }
         }
@@ -341,7 +431,7 @@ fn scan(a: ScanArgs) -> u8 {
         Ok(s) => {
             if !jsonl {
                 let out = format!(
-                    "{status}  run {id}\n  items: {items}  bytes: {bytes}  errors: {errors}  elapsed: {elapsed}\n  findings: high {h}, medium {m}, low {l}, info {i}\n  report: {report}\n  logs:   {logs}",
+                    "{status}  run {id}\n  items: {items}  bytes: {bytes}  errors: {errors}  elapsed: {elapsed}\n  findings: high {h}, medium {m}, low {l}, info {i}\n  timestamp: {ts}\n  report: {report}\n  logs:   {logs}",
                     status = if s.cancelled {
                         "CANCELLED"
                     } else if s.high > 0 {
@@ -358,6 +448,12 @@ fn scan(a: ScanArgs) -> u8 {
                     m = s.medium,
                     l = s.low,
                     i = s.info,
+                    ts = format!(
+                        "{} {}",
+                        s.timestamp["status"].as_str().unwrap_or("off"),
+                        s.timestamp["gen_time"].as_str().unwrap_or("")
+                    )
+                    .trim(),
                     report = s
                         .report_dir
                         .join(format!("statistics.{}.html", cfg.langs[0]))
@@ -377,15 +473,92 @@ fn scan(a: ScanArgs) -> u8 {
     }
 }
 
+fn password(env: &str) -> Option<String> {
+    if let Ok(p) = std::env::var(env) {
+        return Some(p);
+    }
+    use std::io::IsTerminal;
+    if std::io::stdin().is_terminal() {
+        eprint!("Certificate password: ");
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).ok()?;
+        return Some(line.trim_end_matches(['\r', '\n']).to_string());
+    }
+    None
+}
+
+fn timestamp(log: PathBuf, tsa_url: String, actor: Option<String>) -> u8 {
+    let dir = if log.is_file() {
+        log.parent().map(|p| p.to_path_buf()).unwrap_or_default()
+    } else {
+        log
+    };
+    let mut audit_log =
+        match audit::AuditLog::resume(&dir, &actor.unwrap_or_else(rv_hashinv_core::env::os_user)) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("error: {}", e);
+                return EXIT_FINDINGS;
+            }
+        };
+    match trust::timestamp_head(&dir, audit_log.entries(), audit_log.head(), &tsa_url) {
+        Ok(ts) => {
+            if let Err(e) = audit_log.record("timestamp_obtained", Some(&ts.file), ts.to_json()) {
+                eprintln!("error: {}", e);
+                return EXIT_ERROR;
+            }
+            println!(
+                "OK  timestamp {} by {} covers entry #{}",
+                ts.gen_time, ts.tsa, ts.covers_seq
+            );
+            EXIT_OK
+        }
+        Err(e) => {
+            eprintln!("error: {}", e);
+            EXIT_ERROR
+        }
+    }
+}
+
 fn verify_log(log: PathBuf) -> u8 {
     let path = if log.is_dir() {
         log.join("audit.jsonl")
     } else {
         log
     };
-    match audit::verify(&path) {
+    let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    let checked = audit::verify(&path).and_then(|n| {
+        let problems = trust::verify_timestamps(&dir, &audit::heads(&path));
+        if problems.is_empty() {
+            Ok(n)
+        } else {
+            Err(problems)
+        }
+    });
+    match checked {
         Ok(n) => {
             println!("OK  {} entries, chain intact: {}", n, path.display());
+            let mut metas: Vec<_> = std::fs::read_dir(&dir)
+                .map(|d| d.filter_map(|e| e.ok()).map(|e| e.path()).collect())
+                .unwrap_or_default();
+            metas.retain(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("timestamp-") && n.ends_with(".json"))
+            });
+            metas.sort();
+            for m in metas {
+                if let Ok(v) = std::fs::read_to_string(&m)
+                    .map(|t| serde_json::from_str::<serde_json::Value>(&t).unwrap_or_default())
+                {
+                    println!(
+                        "    timestamp {} by {} covers entry #{}",
+                        v["gen_time"].as_str().unwrap_or("?"),
+                        v["tsa"].as_str().unwrap_or("?"),
+                        v["covers_seq"]
+                    );
+                }
+            }
             EXIT_OK
         }
         Err(problems) if problems.len() == 1 && problems[0].starts_with("cannot open") => {
@@ -429,7 +602,7 @@ fn docs_cli() -> String {
     let mut out = String::from(
         "# Command-line reference\n\n<!-- Generated by `rv-hashinv docs-cli`. Do not edit by hand: CI fails if this file differs. -->\n\n",
     );
-    out.push_str("```mermaid\nflowchart LR\n  A[rv-hashinv] --> B[scan]\n  A --> C[verify-log]\n  A --> D[self-test]\n  B --> E[(logs/RUN-ID)]\n  B --> F[(reports/RUN-ID)]\n  C --> E\n```\n\n");
+    out.push_str("```mermaid\nflowchart LR\n  A[rv-hashinv] --> B[scan]\n  A --> C[verify-log]\n  A --> D[self-test]\n  A --> T[timestamp]\n  T --> E\n  B --> E[(logs/RUN-ID)]\n  B --> F[(reports/RUN-ID)]\n  C --> E\n```\n\n");
     out.push_str(&format!(
         "## rv-hashinv\n\n```text\n{}\n```\n\n",
         root.render_long_help().to_string().trim_end()

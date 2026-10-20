@@ -18,6 +18,7 @@ pub mod input;
 pub mod report;
 pub mod run;
 pub mod time;
+pub mod trust;
 
 pub use events::Event;
 pub use hash::HashAlgo;

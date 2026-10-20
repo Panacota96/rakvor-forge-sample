@@ -12,6 +12,9 @@ const MARGIN: f32 = 50.0;
 const BOTTOM: f32 = 62.0;
 const CONTENT_W: f32 = PAGE_W - 2.0 * MARGIN;
 const KEY_W: f32 = 165.0;
+const BAND_H: f32 = 62.0; // Rakvor header band on every page
+const TOP: f32 = PAGE_H - BAND_H - 30.0;
+const SIG_CONTENTS_BYTES: usize = 16384; // room for the CMS signature (certificate chain included)
 
 #[derive(Clone, Debug)]
 pub enum Block {
@@ -32,6 +35,15 @@ pub enum Block {
     },
     Status(String),
     Space(f32),
+    /// Table with a header row and `rows` empty rows to fill in by hand (custody transfers).
+    Grid {
+        header: Vec<String>,
+        widths: Vec<f32>,
+        rows: usize,
+        row_h: f32,
+    },
+    /// Signature lines side by side: label under each line.
+    SignLines(Vec<String>),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -185,14 +197,14 @@ impl Layout {
         Layout {
             pages: Vec::new(),
             cur: String::new(),
-            y: PAGE_H - MARGIN,
+            y: TOP,
         }
     }
 
     fn ensure(&mut self, h: f32) {
         if self.y - h < BOTTOM {
             self.pages.push(std::mem::take(&mut self.cur));
-            self.y = PAGE_H - MARGIN;
+            self.y = TOP;
         }
     }
 
@@ -281,10 +293,81 @@ impl Layout {
     }
 }
 
-const INK: (f32, f32, f32) = (0.063, 0.094, 0.157);
+// Rakvor palette (pages stay light for printing; the brand lives in the header band).
+const INK: (f32, f32, f32) = (0.051, 0.067, 0.090); // #0D1117
 const MUTED: (f32, f32, f32) = (0.278, 0.329, 0.404);
-const ACCENT: (f32, f32, f32) = (0.165, 0.361, 1.0);
+const ACCENT: (f32, f32, f32) = (0.165, 0.361, 1.0); // #2A5CFF
 const LINE: (f32, f32, f32) = (0.894, 0.906, 0.925);
+const NIGHT: (f32, f32, f32) = (0.051, 0.067, 0.090); // #0D1117
+const NIGHT2: (f32, f32, f32) = (0.102, 0.122, 0.149); // #1A1F26
+const VIOLET: (f32, f32, f32) = (0.420, 0.0, 1.0); // #6B00FF
+const CYAN: (f32, f32, f32) = (0.0, 0.898, 1.0); // #00E5FF
+const MIST: (f32, f32, f32) = (0.902, 0.902, 0.902); // #E6E6E6
+
+/// Texts printed on every page.
+pub struct Meta<'a> {
+    pub title: &'a str,
+    pub footer: &'a str,
+    pub page_word: &'a str,
+    pub of_word: &'a str,
+    pub producer: &'a str,
+    pub descriptor: &'a str,
+    pub tagline: &'a str,
+}
+
+/// Signs the bytes covered by /ByteRange and returns a DER CMS SignedData (detached).
+pub type SignFn<'a> = &'a dyn Fn(&[u8]) -> Result<Vec<u8>, String>;
+
+fn band(meta: &Meta) -> String {
+    let mut c = String::new();
+    let rg = |c: &mut String, k: (f32, f32, f32)| {
+        let _ = write!(c, "{:.3} {:.3} {:.3} rg ", k.0, k.1, k.2);
+    };
+    rg(&mut c, NIGHT);
+    let _ = writeln!(c, "0 {:.2} {} {} re f", PAGE_H - BAND_H, PAGE_W, BAND_H);
+    for (i, k) in [ACCENT, VIOLET, CYAN].iter().enumerate() {
+        rg(&mut c, *k);
+        let _ = writeln!(
+            c,
+            "{:.2} {:.2} {:.2} 2.2 re f",
+            i as f32 * PAGE_W / 3.0,
+            PAGE_H - BAND_H - 2.2,
+            PAGE_W / 3.0
+        );
+    }
+    let (x, y, s) = (MARGIN, PAGE_H - BAND_H + 10.0, 42.0);
+    rg(&mut c, NIGHT2);
+    let _ = writeln!(
+        c,
+        "{:.3} {:.3} {:.3} RG 1.6 w {} {} {} {} re B",
+        ACCENT.0, ACCENT.1, ACCENT.2, x, y, s, s
+    );
+    rg(&mut c, MIST);
+    let _ = writeln!(
+        c,
+        "BT /F2 17 Tf {:.2} {:.2} Td (RV) Tj ET",
+        x + 8.5,
+        y + 15.0
+    );
+    rg(&mut c, CYAN);
+    let _ = writeln!(c, "{:.2} {:.2} 22 2 re f", x + 10.0, y + 8.0);
+    rg(&mut c, MIST);
+    let _ = writeln!(
+        c,
+        "BT /F2 13 Tf 4 Tc {:.2} {:.2} Td (RAKVOR) Tj ET 0 Tc",
+        x + s + 14.0,
+        y + 22.0
+    );
+    rg(&mut c, CYAN);
+    let _ = writeln!(
+        c,
+        "BT /F1 7.5 Tf {:.2} {:.2} Td {} Tj ET",
+        x + s + 14.0,
+        y + 9.0,
+        pdf_string(meta.descriptor)
+    );
+    c
+}
 
 /// Hashes and long paths (no spaces, 32+ characters) are set in monospace and wrapped by character.
 fn looks_like_hash(v: &str) -> bool {
@@ -292,14 +375,14 @@ fn looks_like_hash(v: &str) -> bool {
 }
 
 /// Renders blocks to a complete PDF. `footer` is printed on every page followed by "page n / m".
-pub fn render(
-    blocks: &[Block],
-    title: &str,
-    footer: &str,
-    page_word: &str,
-    of_word: &str,
-    producer: &str,
-) -> Vec<u8> {
+pub fn render(blocks: &[Block], meta: &Meta, sign: Option<SignFn>) -> Result<Vec<u8>, String> {
+    let (title, footer, page_word, of_word, producer) = (
+        meta.title,
+        meta.footer,
+        meta.page_word,
+        meta.of_word,
+        meta.producer,
+    );
     let mut l = Layout::new();
     for b in blocks {
         match b {
@@ -383,6 +466,89 @@ pub fn render(
                 l.kv(MARGIN + 10.0, CONTENT_W - 10.0, rows);
             }
             Block::Space(h) => l.y -= h,
+            Block::Grid {
+                header,
+                widths,
+                rows,
+                row_h,
+            } => {
+                const SIZE: f32 = 7.5;
+                let lead = SIZE * 1.3;
+                let wrapped: Vec<Vec<String>> = header
+                    .iter()
+                    .zip(widths)
+                    .map(|(h, w)| wrap(h, Font::Regular, SIZE, w - 6.0))
+                    .collect();
+                let head_h = wrapped.iter().map(|w| w.len()).max().unwrap_or(1) as f32 * lead + 6.0;
+                l.ensure(head_h + row_h * (*rows).min(3) as f32);
+                let draw_row = |l: &mut Layout, h: f32, cells: Option<&Vec<Vec<String>>>| {
+                    let top = l.y;
+                    let mut x = MARGIN;
+                    for (i, w) in widths.iter().enumerate() {
+                        let _ = writeln!(
+                            l.cur,
+                            "{:.3} {:.3} {:.3} RG 0.5 w {:.2} {:.2} {:.2} {:.2} re S",
+                            MUTED.0,
+                            MUTED.1,
+                            MUTED.2,
+                            x,
+                            top - h,
+                            w,
+                            h
+                        );
+                        if let Some(c) = cells {
+                            for (j, line) in c[i].iter().enumerate() {
+                                l.text(
+                                    x + 3.0,
+                                    top - lead * (j as f32 + 1.0),
+                                    Font::Regular,
+                                    SIZE,
+                                    MUTED,
+                                    line,
+                                );
+                            }
+                        }
+                        x += w;
+                    }
+                    l.y = top - h;
+                };
+                draw_row(&mut l, head_h, Some(&wrapped));
+                for _ in 0..*rows {
+                    l.ensure(*row_h);
+                    draw_row(&mut l, *row_h, None);
+                }
+                l.y -= 6.0;
+            }
+            Block::SignLines(labels) => {
+                l.ensure(60.0);
+                l.y -= 44.0;
+                let w = (CONTENT_W - 20.0 * (labels.len() as f32 - 1.0)) / labels.len() as f32;
+                for (i, lab) in labels.iter().enumerate() {
+                    let x = MARGIN + i as f32 * (w + 20.0);
+                    let _ = writeln!(
+                        l.cur,
+                        "{:.3} {:.3} {:.3} RG 0.6 w {:.2} {:.2} m {:.2} {:.2} l S",
+                        INK.0,
+                        INK.1,
+                        INK.2,
+                        x,
+                        l.y,
+                        x + w,
+                        l.y
+                    );
+                    for (j, line) in wrap(lab, Font::Regular, 8.0, w).iter().enumerate() {
+                        l.text(
+                            x,
+                            l.y - 11.0 - 10.0 * j as f32,
+                            Font::Regular,
+                            8.0,
+                            MUTED,
+                            line,
+                        );
+                    }
+                }
+                l.y -= 30.0;
+            }
         }
     }
     l.pages.push(l.cur);
@@ -391,7 +557,15 @@ pub fn render(
     // Assemble objects: 1 catalog, 2 pages, 3-5 fonts, 6 info, then (page, content) pairs.
     let mut objects: Vec<String> = Vec::new();
     let kids: Vec<String> = (0..total).map(|i| format!("{} 0 R", 7 + 2 * i)).collect();
-    objects.push("<< /Type /Catalog /Pages 2 0 R >>".into());
+    let (sig_obj, widget_obj) = (7 + 2 * total, 8 + 2 * total);
+    if sign.is_some() {
+        objects.push(format!(
+            "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [{} 0 R] /SigFlags 3 >> >>",
+            widget_obj
+        ));
+    } else {
+        objects.push("<< /Type /Catalog /Pages 2 0 R >>".into());
+    }
     objects.push(format!(
         "<< /Type /Pages /Kids [{}] /Count {} >>",
         kids.join(" "),
@@ -412,7 +586,8 @@ pub fn render(
         date
     ));
     for (i, content) in l.pages.iter().enumerate() {
-        let mut c = content.clone();
+        let mut c = band(meta);
+        c.push_str(content);
         let foot = format!(
             "{}  \u{2014}  {} {} {} {}",
             footer,
@@ -441,10 +616,36 @@ pub fn render(
             MARGIN,
             pdf_string(&foot)
         );
-        objects.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents {} 0 R >>", PAGE_W, PAGE_H, 8 + 2 * i));
+        let _ = writeln!(
+            c,
+            "{:.3} {:.3} {:.3} rg BT /F1 6.8 Tf {} 22 Td {} Tj ET",
+            MUTED.0,
+            MUTED.1,
+            MUTED.2,
+            MARGIN,
+            pdf_string(meta.tagline)
+        );
+        let annots = if sign.is_some() && i == 0 {
+            format!(" /Annots [{} 0 R]", widget_obj)
+        } else {
+            String::new()
+        };
+        objects.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents {} 0 R{} >>", PAGE_W, PAGE_H, 8 + 2 * i, annots));
         objects.push(format!("<< /Length {} >>\nstream\n{}endstream", c.len(), c));
     }
 
+    if sign.is_some() {
+        objects.push(format!(
+            "<< /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached /ByteRange [0 0000000000 0000000000 0000000000] /Contents <{}> /M ({}) /Reason {} >>",
+            "0".repeat(SIG_CONTENTS_BYTES * 2),
+            date,
+            pdf_string(title)
+        ));
+        objects.push(format!(
+            "<< /Type /Annot /Subtype /Widget /FT /Sig /T (RakvorExaminerSignature) /V {} 0 R /Rect [0 0 0 0] /F 132 /P 7 0 R >>",
+            sig_obj
+        ));
+    }
     let mut out: Vec<u8> = b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n".to_vec();
     let mut offsets = Vec::with_capacity(objects.len());
     for (i, o) in objects.iter().enumerate() {
@@ -463,7 +664,41 @@ pub fn render(
         xref
     );
     out.extend_from_slice(x.as_bytes());
-    out
+    if let Some(sign) = sign {
+        sign_in_place(&mut out, sign)?;
+    }
+    Ok(out)
+}
+
+fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Fills /ByteRange and /Contents of the signature placeholder (no incremental update needed:
+/// the placeholder was written with the document).
+fn sign_in_place(out: &mut [u8], sign: SignFn) -> Result<(), String> {
+    let start =
+        find(out, b"/Contents <0000").ok_or("signature placeholder missing")? + "/Contents ".len();
+    let end = start + 2 + SIG_CONTENTS_BYTES * 2;
+    let br_marker = b"/ByteRange [0 0000000000 0000000000 0000000000]";
+    let br = find(out, br_marker).ok_or("byte range placeholder missing")?;
+    let range = format!(
+        "/ByteRange [0 {:010} {:010} {:010}]",
+        start,
+        end,
+        out.len() - end
+    );
+    out[br..br + br_marker.len()].copy_from_slice(range.as_bytes());
+    let mut signed = Vec::with_capacity(out.len());
+    signed.extend_from_slice(&out[..start]);
+    signed.extend_from_slice(&out[end..]);
+    let der = sign(&signed)?;
+    if der.len() > SIG_CONTENTS_BYTES {
+        return Err(format!("signature too large ({} bytes)", der.len()));
+    }
+    let hex = crate::hash::hex(&der).to_uppercase();
+    out[start + 1..start + 1 + hex.len()].copy_from_slice(hex.as_bytes());
+    Ok(())
 }
 
 #[cfg(test)]
@@ -479,7 +714,7 @@ mod tests {
                 "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
             )]));
         }
-        let pdf = render(&blocks, "t", "foot", "Page", "of", "test");
+        let pdf = render(&blocks, &test_meta(), None).unwrap();
         assert!(pdf.starts_with(b"%PDF-1.4"));
         assert!(pdf.ends_with(b"%%EOF\n"));
         let text = String::from_utf8_lossy(&pdf);
@@ -488,6 +723,52 @@ mod tests {
             "multi-page"
         );
         assert!(text.contains("\\351"), "é encoded as WinAnsi octal");
+    }
+
+    fn test_meta() -> Meta<'static> {
+        Meta {
+            title: "t",
+            footer: "foot",
+            page_word: "Page",
+            of_word: "of",
+            producer: "test",
+            descriptor: "FORENSICS",
+            tagline: "We uncover the hidden.",
+        }
+    }
+
+    #[test]
+    fn signature_placeholder_is_filled_and_byte_range_covers_the_rest() {
+        let sign = |data: &[u8]| -> Result<Vec<u8>, String> {
+            Ok(crate::hash::hash_bytes(data, crate::hash::HashAlgo::Sha256).into_bytes())
+        };
+        let pdf = render(
+            &[
+                Block::Para("x".into()),
+                Block::Grid {
+                    header: vec!["a".into(), "b".into()],
+                    widths: vec![100.0, 100.0],
+                    rows: 3,
+                    row_h: 20.0,
+                },
+                Block::SignLines(vec!["Examiner".into(), "Receiver".into()]),
+            ],
+            &test_meta(),
+            Some(&sign),
+        )
+        .unwrap();
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(text.contains("/SigFlags 3") && !text.contains("/ByteRange [0 0000000000"));
+        let start = find(&pdf, b"/Contents <").unwrap() + 10;
+        let end = start + 2 + SIG_CONTENTS_BYTES * 2;
+        let mut covered = pdf[..start].to_vec();
+        covered.extend_from_slice(&pdf[end..]);
+        let expected = crate::hash::hex(
+            &crate::hash::hash_bytes(&covered, crate::hash::HashAlgo::Sha256).into_bytes(),
+        )
+        .to_uppercase();
+        assert!(text.contains(&format!("<{}", expected)));
+        assert!(pdf.ends_with(b"%%EOF\n"));
     }
 
     #[test]

@@ -32,6 +32,38 @@ pub struct RunConfig {
     pub command_line: Vec<String>,
     pub tool_name: String,
     pub tool_version: String,
+    /// Custody form: "co" (Colombia, Fiscalía) or "fr" (France, scellés).
+    pub jurisdiction: String,
+    /// RFC 3161 time-stamping authority; None = no timestamp.
+    pub tsa_url: Option<String>,
+    /// Examiner's .p12/.pfx used to sign every PDF.
+    pub sign_cert: Option<PathBuf>,
+    /// Never logged.
+    pub sign_password: Option<String>,
+}
+
+impl Default for RunConfig {
+    fn default() -> Self {
+        RunConfig {
+            inputs: vec![],
+            input_list: None,
+            recursive: false,
+            algorithms: vec![HashAlgo::Sha256],
+            out_dir: PathBuf::from("rakvor-out"),
+            langs: vec!["en".into()],
+            actor: "unknown".into(),
+            case_id: None,
+            frontend: "cli".into(),
+            preamble: vec![],
+            command_line: vec![],
+            tool_name: crate::TOOL_NAME.into(),
+            tool_version: crate::TOOL_VERSION.into(),
+            jurisdiction: "co".into(),
+            tsa_url: None,
+            sign_cert: None,
+            sign_password: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -49,6 +81,8 @@ pub struct RunSummary {
     pub report_dir: PathBuf,
     pub log_dir: PathBuf,
     pub audit_head: String,
+    /// {"status": "ok"|"pending"|"off", ...}
+    pub timestamp: Value,
 }
 
 const PROGRESS_EVERY: Duration = Duration::from_millis(150);
@@ -86,6 +120,12 @@ pub fn run(
     if cfg.langs.is_empty() {
         return Err("select at least one report language".into());
     }
+    if cfg.jurisdiction != "co" && cfg.jurisdiction != "fr" {
+        return Err(format!(
+            "unknown jurisdiction '{}': use co or fr",
+            cfg.jurisdiction
+        ));
+    }
     let started = Instant::now();
     let started_utc = utc_now();
     let run_id = new_run_id();
@@ -104,6 +144,8 @@ pub fn run(
             "inputs": cfg.inputs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
             "input_list": cfg.input_list.as_ref().map(|p| p.display().to_string()),
             "recursive": cfg.recursive, "out_dir": cfg.out_dir.display().to_string(),
+            "jurisdiction": cfg.jurisdiction, "tsa_url": cfg.tsa_url,
+            "sign_cert": cfg.sign_cert.as_ref().map(|p| p.display().to_string()),
         }),
     )
     .map_err(io)?;
@@ -121,6 +163,27 @@ pub fn run(
         report::write_hashed(&log_dir, "environment.json", &env_json, &cfg.algorithms)?;
     log.record("environment_recorded", Some("environment.json"), env_digest)
         .map_err(io)?;
+    let signer = match &cfg.sign_cert {
+        None => None,
+        Some(p) => {
+            match crate::trust::PdfSigner::load(p, cfg.sign_password.as_deref().unwrap_or("")) {
+                Ok(s) => {
+                    log.record(
+                        "signing_certificate_loaded",
+                        Some(&p.display().to_string()),
+                        json!({"subject": s.subject, "certificate_sha256": s.fingerprint_sha256}),
+                    )
+                    .map_err(io)?;
+                    Some(std::sync::Arc::new(s))
+                }
+                Err(e) => {
+                    log.record("run_failed", None, json!({"reason": e}))
+                        .map_err(io)?;
+                    return Err(e);
+                }
+            }
+        }
+    };
 
     let items = match collect(&cfg.inputs, cfg.input_list.as_deref(), cfg.recursive) {
         Ok(i) => i,
@@ -312,7 +375,7 @@ pub fn run(
                 Finding::new("DUPLICATE", Severity::Info)
                     .with("algorithm", primary.name())
                     .with("count", idx.len().to_string())
-                    .with("others", others.join(", ")),
+                    .with("others", crate::report::capped_list(&others, 10)),
             );
         }
     }
@@ -368,6 +431,9 @@ pub fn run(
         finished_utc: utc_now(),
         elapsed_ms,
         cancelled,
+        jurisdiction: cfg.jurisdiction.clone(),
+        signer,
+        timestamp: json!({"status": "off"}),
     };
     let log_dir_s = log_dir.display().to_string();
     for r in &results {
@@ -396,6 +462,29 @@ pub fn run(
         bytes: results.iter().map(|r| r.size).sum(),
         errors,
     };
+    // Trusted timestamp of the chain head: covers every evidence hash, finding and per-item report digest.
+    let mut info = info;
+    if let Some(url) = &cfg.tsa_url {
+        match crate::trust::timestamp_head(&log_dir, log.entries(), log.head(), url) {
+            Ok(ts) => {
+                log.record("timestamp_obtained", Some(&ts.file), ts.to_json())
+                    .map_err(io)?;
+                let mut v = ts.to_json();
+                v["status"] = json!("ok");
+                info.timestamp = v;
+            }
+            Err(e) => {
+                log.record("timestamp_pending", None, json!({"tsa": url, "reason": e, "covers_seq": log.entries(), "head": log.head()})).map_err(io)?;
+                info.timestamp = json!({"status": "pending", "tsa": url, "reason": e});
+            }
+        }
+        sink(&Event::Timestamp {
+            status: info.timestamp["status"].as_str().unwrap_or_default().into(),
+            tsa: url.clone(),
+            gen_time: info.timestamp["gen_time"].as_str().map(String::from),
+            reason: info.timestamp["reason"].as_str().map(String::from),
+        });
+    }
     let audit = AuditRef {
         head: log.head().to_string(),
         entries: log.entries(),
@@ -428,6 +517,7 @@ pub fn run(
         report_dir: report_dir.clone(),
         log_dir: log_dir.clone(),
         audit_head: String::new(),
+        timestamp: info.timestamp.clone(),
     };
     log.record("run_finished", None, json!({"items": summary.items, "bytes": summary.bytes, "errors": errors, "elapsed_ms": summary.elapsed_ms, "high": summary.high, "medium": summary.medium, "low": summary.low, "info": summary.info, "cancelled": cancelled})).map_err(io)?;
     sink(&Event::RunFinished {
@@ -468,6 +558,7 @@ mod tests {
             command_line: vec![],
             tool_name: "rv-hashinv".into(),
             tool_version: "0.0.0".into(),
+            ..Default::default()
         }
     }
 
@@ -497,6 +588,9 @@ mod tests {
         }
         let item = s.report_dir.join("items/00003-photo.jpg");
         for f in [
+            "custody.json",
+            "custody.es.pdf",
+            "custody.en.html",
             "technical.json",
             "summary.json",
             "technical.es.html",

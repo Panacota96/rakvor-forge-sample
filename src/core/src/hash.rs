@@ -136,6 +136,17 @@ pub fn hex(b: &[u8]) -> String {
     s
 }
 
+/// Hex string to bytes (None if malformed).
+pub fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
 /// Result of hashing one stream.
 pub struct HashOutcome {
     pub digests: Vec<(HashAlgo, String)>,

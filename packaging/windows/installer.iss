@@ -24,6 +24,7 @@ OutputBaseFilename=rv-hashinv-{#AppVersion}-windows-x64-setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile={#SourceDir}\assets\brand\rv.ico
 ChangesEnvironment=yes
 UninstallDisplayIcon={app}\rv-hashinv-gui.exe
 

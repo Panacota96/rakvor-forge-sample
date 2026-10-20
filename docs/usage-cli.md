@@ -7,6 +7,8 @@ flowchart LR
   A[rv-hashinv] --> B[scan]
   A --> C[verify-log]
   A --> D[self-test]
+  A --> T[timestamp]
+  T --> E
   B --> E[(logs/RUN-ID)]
   B --> F[(reports/RUN-ID)]
   C --> E
@@ -31,6 +33,7 @@ Commands:
   scan        Hash, check and report on a file, a folder or a list of files
   verify-log  Verify that an audit log (audit.jsonl) has not been edited, truncated or re-ordered
   self-test   Check every hash algorithm against known-answer test vectors
+  timestamp   Add an RFC 3161 timestamp to a finished run (e.g. after working offline)
   help        Print this message or the help of the given subcommand(s)
 
 Options:
@@ -116,6 +119,35 @@ Options:
           - jsonl: One JSON event per line on stdout (for scripts and other tools)
           - none:  No progress output; only the final summary
 
+  -j, --jurisdiction <CC>
+          Chain-of-custody form per item: co (Colombia, Fiscalía style, Spanish) or fr (France,
+          scellés, French).
+          An English copy is always added.
+          Default: co
+          Example: --jurisdiction fr
+
+      --tsa-url <URL>
+          RFC 3161 time-stamping authority for the audit chain head.
+          Default: http://timestamp.digicert.com
+          Example: --tsa-url https://freetsa.org/tsr
+
+      --no-timestamp
+          Do not request a trusted timestamp (offline labs). Also set by RV_NO_TIMESTAMP=1.
+          Default: off (a timestamp is requested)
+          Example: --no-timestamp
+
+      --sign-cert <P12>
+          Examiner's certificate (.p12/.pfx, RSA) used to sign every PDF report. The password is
+          read from
+          the environment variable named by --sign-pass-env, or asked for interactively.
+          Default: none (PDFs are not signed)
+          Example: --sign-cert C:\certs\ana-ruiz.p12
+
+      --sign-pass-env <VAR>
+          Environment variable holding the certificate password.
+          Default: RV_SIGN_PASSWORD
+          Example: --sign-pass-env CERT_PASS
+
   -h, --help
           Print help (see a summary with '-h')
 
@@ -149,6 +181,9 @@ FILES WRITTEN:
   review.
   <OUT>/reports/<RUN-ID>/items/<NNNNN>-<NAME>/summary.json|.<LANG>.html|.<LANG>.pdf     Customer
   summary.
+  <OUT>/reports/<RUN-ID>/items/<NNNNN>-<NAME>/custody.json|.<es|fr>.html|.pdf|.en.html|.pdf  Custody
+  form.
+  <OUT>/logs/<RUN-ID>/timestamp-<SEQ>.tsr|.json  RFC 3161 token for the audit chain head.
 
 FORENSIC NOTES:
   - Evidence is opened read-only and never modified; modification times are compared before and
@@ -159,6 +194,11 @@ FORENSIC NOTES:
   - A file without findings is not proven authentic; read the Limitations section of each report.
   - MD5 and SHA-1 are accepted for compatibility with older case files; pair them with SHA-256 or
   BLAKE3.
+  - The chain head is timestamped by an RFC 3161 authority (proves when the log existed). Offline?
+  The run
+    finishes with `timestamp_pending`; run `rv-hashinv timestamp <LOG>` later.
+  - With --sign-cert every PDF is signed with the examiner's certificate; the password is never
+  logged.
 ```
 
 ## rv-hashinv verify-log
@@ -205,5 +245,42 @@ EXAMPLES:
 EXIT CODES:
   0  All algorithms give the published answer for the input "abc".
   1  At least one algorithm failed: do not use this build for evidence.
+```
+
+## rv-hashinv timestamp
+
+```text
+Add an RFC 3161 timestamp to a finished run (e.g. after working offline)
+
+Usage: rv-hashinv timestamp [OPTIONS] <LOG>
+
+Arguments:
+  <LOG>
+          The run's log folder (or its audit.jsonl).
+          
+          Example: rakvor-out/logs/20261019T101500Z-a1b2c3
+
+Options:
+      --tsa-url <URL>
+          RFC 3161 time-stamping authority.
+          Default: http://timestamp.digicert.com
+          Example: --tsa-url https://freetsa.org/tsr
+
+  -a, --actor <NAME>
+          Name written in the new audit entry.
+          Default: the operating-system user name
+          Example: --actor "Ana Ruiz"
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+EXAMPLES:
+  rv-hashinv timestamp rakvor-out/logs/20261019T101500Z-a1b2c3
+  rv-hashinv timestamp rakvor-out/logs/20261019T101500Z-a1b2c3 --tsa-url https://freetsa.org/tsr
+
+EXIT CODES:
+  0  Timestamp obtained and logged.
+  1  The TSA could not be reached (nothing changed; try again).
+  3  The log is broken: no timestamp is added to a broken chain.
 ```
 

@@ -11,6 +11,7 @@ SCHEMAS = {
     "statistics.json": "statistics.schema.json",
     "technical.json": "item-technical.schema.json",
     "summary.json": "item-summary.schema.json",
+    "custody.json": "item-custody.schema.json",
 }
 
 

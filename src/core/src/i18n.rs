@@ -79,6 +79,19 @@ impl Catalog {
         &self.data["labels"]
     }
 
+    pub fn brand(&self) -> &Value {
+        &self.data["brand"]
+    }
+
+    pub fn custody(&self) -> &Value {
+        &self.data["custody"]
+    }
+
+    /// GUI wording.
+    pub fn ui(&self, key: &str) -> String {
+        self.data["ui"][key].as_str().unwrap_or(key).to_string()
+    }
+
     pub fn label(&self, key: &str) -> String {
         self.data["labels"][key].as_str().unwrap_or(key).to_string()
     }

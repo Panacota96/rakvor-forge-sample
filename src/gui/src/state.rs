@@ -62,6 +62,14 @@ pub struct GuiState {
     pub outcome: Option<Outcome>,
     /// User actions recorded before the run; handed to the core as audit preamble entries.
     pub ui_actions: Vec<(String, Value)>,
+    /// Interface language (en/es/fr), independent from the report language.
+    pub ui_lang: String,
+    pub jurisdiction: String,
+    pub timestamp: bool,
+    pub tsa_url: String,
+    pub sign_cert: String,
+    /// Kept in memory only; never logged.
+    pub sign_password: String,
 }
 
 impl Default for GuiState {
@@ -81,6 +89,12 @@ impl Default for GuiState {
             warnings: vec![],
             outcome: None,
             ui_actions: vec![],
+            ui_lang: "en".into(),
+            jurisdiction: "co".into(),
+            timestamp: true,
+            tsa_url: rv_hashinv_core::trust::DEFAULT_TSA.into(),
+            sign_cert: String::new(),
+            sign_password: String::new(),
         }
     }
 }
@@ -166,6 +180,48 @@ impl GuiState {
         }
     }
 
+    /// GUI text in the interface language.
+    pub fn tr(&self, key: &str) -> String {
+        i18n::catalog(&self.ui_lang).ui(key)
+    }
+
+    pub fn set_ui_lang(&mut self, l: &str) {
+        if self.ui_lang != l && ["en", "es", "fr"].contains(&l) {
+            self.ui_lang = l.to_string();
+            self.note("ui_interface_language_changed", json!({"ui_lang": l}));
+        }
+    }
+
+    pub fn set_jurisdiction(&mut self, j: &str) {
+        if self.jurisdiction != j && (j == "co" || j == "fr") {
+            self.jurisdiction = j.to_string();
+            self.note("ui_jurisdiction_changed", json!({"jurisdiction": j}));
+        }
+    }
+
+    pub fn set_timestamp(&mut self, on: bool, url: &str) {
+        let url = url.trim().to_string();
+        if self.timestamp != on || self.tsa_url != url {
+            self.timestamp = on;
+            self.tsa_url = url.clone();
+            self.note(
+                "ui_timestamp_changed",
+                json!({"enabled": on, "tsa_url": url}),
+            );
+        }
+    }
+
+    pub fn set_sign_cert(&mut self, path: &str) {
+        let path = path.trim().trim_matches('"').to_string();
+        if self.sign_cert != path {
+            self.sign_cert = path.clone();
+            self.note(
+                "ui_signing_certificate_changed",
+                json!({"path": if path.is_empty() { Value::Null } else { json!(path) }}),
+            );
+        }
+    }
+
     pub fn can_start(&self) -> bool {
         !self.is_running() && !self.inputs.is_empty() && !self.out_dir.trim().is_empty()
     }
@@ -177,8 +233,13 @@ impl GuiState {
         }
         hash::validate_selection(&self.selected)?;
         let langs = i18n::parse_langs(&self.lang)?;
+        if !self.sign_cert.is_empty() && !std::path::Path::new(&self.sign_cert).is_file() {
+            return Err(format!("Signing certificate not found: {}", self.sign_cert));
+        }
         let mut preamble = self.ui_actions.clone();
-        preamble.push(("ui_start_clicked".into(), json!({"algorithms": self.selected, "lang": self.lang, "recursive": self.recursive, "inputs": self.inputs.len()})));
+        preamble.push(("ui_start_clicked".into(), json!({"algorithms": self.selected, "lang": self.lang, "recursive": self.recursive,
+            "inputs": self.inputs.len(), "jurisdiction": self.jurisdiction, "timestamp": self.timestamp,
+            "pdf_signing": !self.sign_cert.is_empty(), "at_utc": rv_hashinv_core::time::utc_now()})));
         let settings = vec![
             format!("{} (gui)", TOOL_NAME),
             format!(
@@ -200,6 +261,23 @@ impl GuiState {
             format!("lang={}", self.lang),
             format!("recursive={}", self.recursive),
             format!("out={}", self.out_dir.trim()),
+            format!("jurisdiction={}", self.jurisdiction),
+            format!(
+                "tsa={}",
+                if self.timestamp {
+                    self.tsa_url.as_str()
+                } else {
+                    "off"
+                }
+            ),
+            format!(
+                "sign_cert={}",
+                if self.sign_cert.is_empty() {
+                    "none"
+                } else {
+                    self.sign_cert.as_str()
+                }
+            ),
         ];
         Ok(RunConfig {
             inputs: self.inputs.clone(),
@@ -219,6 +297,22 @@ impl GuiState {
             command_line: settings,
             tool_name: TOOL_NAME.into(),
             tool_version: TOOL_VERSION.into(),
+            jurisdiction: self.jurisdiction.clone(),
+            tsa_url: if self.timestamp {
+                Some(self.tsa_url.clone())
+            } else {
+                None
+            },
+            sign_cert: if self.sign_cert.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(&self.sign_cert))
+            },
+            sign_password: if self.sign_password.is_empty() {
+                None
+            } else {
+                Some(self.sign_password.clone())
+            },
         })
     }
 
@@ -333,17 +427,20 @@ impl GuiState {
             _ => "\u{2014}".into(),
         };
         format!(
-            "Elapsed: {}   ·   Remaining (estimate): {}",
+            "{}: {}   \u{00B7}   {}: {}",
+            self.tr("elapsed"),
             human_duration(elapsed),
+            self.tr("remaining"),
             eta
         )
     }
 
     pub fn progress_text(&self) -> String {
         format!(
-            "{} / {} files  ·  {:.0}%",
+            "{} / {} {}  \u{00B7}  {:.0}%",
             self.progress.done,
             self.progress.total,
+            self.tr("files"),
             self.fraction() * 100.0
         )
     }
@@ -444,11 +541,42 @@ mod tests {
     }
 
     #[test]
+    fn interface_language_and_trust_settings_are_audited() {
+        let mut s = GuiState::default();
+        s.set_ui_lang("fr");
+        assert_eq!(s.tr("start"), "Lancer l'analyse");
+        s.set_ui_lang("es");
+        assert_eq!(s.tr("start"), "Iniciar revisión");
+        s.set_jurisdiction("fr");
+        s.set_timestamp(false, "http://tsa.example");
+        s.set_sign_cert("missing.p12");
+        s.add_input(PathBuf::from("."));
+        assert!(s.to_config().is_err(), "missing certificate refused");
+        s.set_sign_cert("");
+        let cfg = s.to_config().unwrap();
+        assert_eq!(cfg.jurisdiction, "fr");
+        assert!(cfg.tsa_url.is_none());
+        let actions: Vec<&str> = cfg.preamble.iter().map(|(a, _)| a.as_str()).collect();
+        assert!(
+            actions.contains(&"ui_interface_language_changed")
+                && actions.contains(&"ui_timestamp_changed")
+        );
+        assert!(
+            cfg.preamble
+                .iter()
+                .all(|(_, d)| !d.to_string().contains("password"))
+        );
+    }
+
+    #[test]
     fn a_real_run_from_gui_settings_is_audited() {
         let ev = std::env::temp_dir().join(format!("rv-gui-test-{}", std::process::id()));
         std::fs::create_dir_all(&ev).unwrap();
         std::fs::write(ev.join("a.txt"), "x").unwrap();
-        let mut s = GuiState::default();
+        let mut s = GuiState {
+            timestamp: false, // tests stay offline
+            ..Default::default()
+        };
         s.add_input(ev.clone());
         s.out_dir = ev.join("out").display().to_string();
         let cfg = s.to_config().unwrap();

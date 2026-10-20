@@ -44,23 +44,35 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Unit and integration tests (includes docs/usage-cli.md drift check)
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Python helpers (independent verifiers + local test TSA/PKI for the trust tests)
+        run: pip install blake3 jsonschema pyhanko
+      - name: Unit and integration tests (includes docs/usage-cli.md drift check and trust tests)
+        env:
+          RV_TEST_PYTHON: python
         run: cargo test --workspace --locked
       - name: Self-test of the hash implementations
         run: cargo run --locked -q -p rv-hashinv-cli -- self-test
       - name: Sample run
         shell: bash
-        run: cargo run --locked -q -p rv-hashinv-cli -- scan -i examples/sample/evidence --hash sha256,blake3 --lang all --out ci-out --progress none
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+        run: cargo run --locked -q -p rv-hashinv-cli -- scan -i examples/sample/evidence --hash sha256,blake3 --lang all --out ci-out --progress none --no-timestamp
       - name: Cross-language verification (Python re-checks the chain, hashes and JSON schemas)
         shell: bash
         run: |
-          pip install blake3 jsonschema
           run=$(find ci-out/logs -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort | tail -n 1)
           python tests/verify_chain.py "ci-out/logs/$run"
           python tests/validate_reports.py "ci-out/reports/$run"
+      - name: Real TSA smoke test (DigiCert; network-dependent, informative)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: bash
+        run: |
+          cargo run --locked -q -p rv-hashinv-cli -- scan -i examples/sample/evidence --out tsa-out --progress none | tee tsa.txt
+          grep -q "timestamp: ok" tsa.txt
+          run=$(find tsa-out/logs -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort | tail -n 1)
+          cargo run --locked -q -p rv-hashinv-cli -- verify-log "tsa-out/logs/$run"
       - name: Build release binaries (Windows)
         if: runner.os == 'Windows'
         run: cargo build --release --locked -p rv-hashinv-cli -p rv-hashinv-gui

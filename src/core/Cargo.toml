@@ -24,6 +24,16 @@ serde_json.workspace = true
 minijinja.workspace = true
 chrono.workspace = true
 walkdir.workspace = true
+ureq.workspace = true
+p12-keystore.workspace = true
+cms.workspace = true
+x509-tsp.workspace = true
+x509-cert.workspace = true
+der.workspace = true
+spki.workspace = true
+const-oid.workspace = true
+rsa.workspace = true
+sha2-legacy.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

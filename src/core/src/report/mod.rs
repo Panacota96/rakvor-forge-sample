@@ -21,13 +21,22 @@ pub const SCHEMA_TECHNICAL: &str = "rakvor.item-technical/1";
 pub const SCHEMA_SUMMARY: &str = "rakvor.item-summary/1";
 
 /// Run-level limitations, always printed (what this tool cannot tell you).
-pub const LIMITATIONS: [&str; 3] = [
+pub const LIMITATIONS: [&str; 4] = [
     "SIGNATURE_TABLE_LIMITED",
     "TIMESTAMPS_FROM_FILESYSTEM",
     "CLEAN_RESULT_IS_NOT_AUTHENTICITY",
+    "TIMESTAMP_PROVES_EXISTENCE_ONLY",
 ];
+pub const SCHEMA_CUSTODY: &str = "rakvor.item-custody/1";
+const BLANK_TRANSFER_ROWS: usize = 6;
 
-#[derive(Clone, Debug)]
+/// Custody form language per jurisdiction; an English copy is always added.
+pub fn custody_langs(jurisdiction: &str) -> Vec<String> {
+    let main = if jurisdiction == "fr" { "fr" } else { "es" };
+    vec![main.to_string(), "en".to_string()]
+}
+
+#[derive(Clone)]
 pub struct RunInfo {
     pub tool_name: String,
     pub tool_version: String,
@@ -41,6 +50,11 @@ pub struct RunInfo {
     pub finished_utc: String,
     pub elapsed_ms: u64,
     pub cancelled: bool,
+    /// "co" (Colombia, Fiscalía) or "fr" (France, scellés)
+    pub jurisdiction: String,
+    pub signer: Option<std::sync::Arc<crate::trust::PdfSigner>>,
+    /// {"status": "ok"|"pending"|"off", ...}
+    pub timestamp: Value,
 }
 
 #[derive(Clone, Debug)]
@@ -124,11 +138,17 @@ fn env() -> &'static Environment<'static> {
             include_str!("../../../../templates/summary.html"),
         )
         .expect("template");
+        e.add_template(
+            "custody.html",
+            include_str!("../../../../templates/custody.html"),
+        )
+        .expect("template");
         e
     })
 }
 
 const CSS: &str = include_str!("../../../../templates/report.css");
+const LOGO_SVG: &str = include_str!("../../../../templates/rv-mark.svg");
 
 pub fn render_html(template: &str, ctx: &Value) -> Result<String, String> {
     env()
@@ -172,6 +192,22 @@ fn base(c: &Catalog, run: &RunInfo) -> serde_json::Map<String, Value> {
                 .collect::<Vec<_>>()
         ),
     );
+    m.insert("brand".into(), c.brand().clone());
+    m.insert("logo_svg".into(), json!(LOGO_SVG));
+    m.insert(
+        "signature".into(),
+        json!({"signed": run.signer.is_some(), "by": run.signer.as_ref().map(|s| s.subject.clone()).unwrap_or_default()}),
+    );
+    let mut ts = run.timestamp.clone();
+    if !ts.is_object() {
+        ts = json!({"status": "off"});
+    }
+    let label = c.label(&format!(
+        "timestamp_{}",
+        ts["status"].as_str().unwrap_or("off")
+    ));
+    ts["status_label"] = json!(label);
+    m.insert("timestamp".into(), ts);
     m
 }
 
@@ -185,6 +221,32 @@ fn throughput(bytes: u64, ms: u64) -> String {
     } else {
         format!("{:.1} KiB/s", per_s / 1024.0)
     }
+}
+
+/// Keeps reports readable at scale (50,000 files): the first `max` names, then "… (+N)".
+/// The complete lists stay in hashes.csv, statistics.json and the audit log.
+pub fn capped_list(names: &[String], max: usize) -> String {
+    if names.len() <= max {
+        names.join(", ")
+    } else {
+        format!(
+            "{}, \u{2026} (+{})",
+            names[..max].join(", "),
+            names.len() - max
+        )
+    }
+}
+
+fn capped_paths(items: &[ItemResult], idx: &[usize]) -> Vec<String> {
+    let mut p: Vec<String> = idx
+        .iter()
+        .take(20)
+        .map(|&i| items[i].path.display().to_string())
+        .collect();
+    if idx.len() > 20 {
+        p.push(format!("\u{2026} (+{})", idx.len() - 20));
+    }
+    p
 }
 
 /// Groups of identical content by primary hash (only items that were hashed and are not empty).
@@ -234,7 +296,7 @@ pub fn statistics_context(
         .collect();
     let duplicate_rows: Vec<Value> = duplicate_groups(items)
         .into_iter()
-        .map(|(h, idx)| json!({"hash": h, "paths": idx.iter().map(|&i| items[i].path.display().to_string()).collect::<Vec<_>>()}))
+        .map(|(h, idx)| json!({"hash": h, "paths": capped_paths(items, &idx)}))
         .collect();
     let item_rows: Vec<Value> = items
         .iter()
@@ -331,7 +393,8 @@ fn findings_json(it: &ItemResult, langs: &[String]) -> Value {
 fn run_json(run: &RunInfo) -> Value {
     json!({"run_id": run.run_id, "case_id": run.case_id, "actor": run.actor, "frontend": run.frontend,
            "algorithms": run.algorithms, "langs": run.langs, "started_utc": run.started_utc,
-           "finished_utc": run.finished_utc, "elapsed_ms": run.elapsed_ms, "cancelled": run.cancelled})
+           "finished_utc": run.finished_utc, "elapsed_ms": run.elapsed_ms, "cancelled": run.cancelled,
+           "jurisdiction": run.jurisdiction, "pdf_signed_by": run.signer.as_ref().map(|s| s.subject.clone())})
 }
 
 pub fn statistics_json(
@@ -368,6 +431,7 @@ pub fn statistics_json(
               "findings": it.findings.iter().map(|f| f.code.clone()).collect::<Vec<_>>(), "report_folder": format!("items/{}", it.folder())})).collect::<Vec<_>>(),
         "limitations": LIMITATIONS,
         "audit": {"head": audit.head, "entries": audit.entries, "log_dir": audit.log_dir},
+        "timestamp": if run.timestamp.is_object() { run.timestamp.clone() } else { json!({"status": "off"}) },
     })
 }
 
@@ -426,28 +490,56 @@ fn arr<'a>(v: &'a Value, key: &str) -> &'a [Value] {
 
 fn header(ctx: &Value, title_key: &str, subtitle: String) -> Vec<Block> {
     vec![
-        Block::Brand("RAKVOR \u{00B7} FORENSICS".into()),
         Block::Title(s(ctx, &format!("t.{}", title_key))),
         Block::Subtitle(subtitle),
     ]
 }
 
-fn pdf_footer(ctx: &Value) -> (String, String, String, String) {
-    (
-        format!(
-            "{} {} {} \u{00B7} {}",
-            s(ctx, "t.generated_by"),
-            s(ctx, "tool.name"),
-            s(ctx, "tool.version"),
-            s(ctx, "run.run_id")
-        ),
-        s(ctx, "t.page"),
-        s(ctx, "t.of"),
-        format!("{} {}", s(ctx, "tool.name"), s(ctx, "tool.version")),
-    )
+fn signature_row(ctx: &Value) -> (String, String) {
+    let t = |k: &str| s(ctx, &format!("t.{}", k));
+    let v = if ctx["signature"]["signed"].as_bool() == Some(true) {
+        format!("{} {}", t("signed_by"), s(ctx, "signature.by"))
+    } else {
+        t("not_signed")
+    };
+    (t("signature"), v)
 }
 
-pub fn statistics_pdf(ctx: &Value) -> Vec<u8> {
+/// Renders blocks with the Rakvor band, footer and tagline; signs when the run has a certificate.
+fn finish(ctx: &Value, title: &str, blocks: &[Block], run: &RunInfo) -> Result<Vec<u8>, String> {
+    let footer = format!(
+        "{} {} {} \u{00B7} {}",
+        s(ctx, "t.generated_by"),
+        s(ctx, "tool.name"),
+        s(ctx, "tool.version"),
+        s(ctx, "run.run_id")
+    );
+    let producer = format!("{} {}", s(ctx, "tool.name"), s(ctx, "tool.version"));
+    let (page, of, descriptor, tagline) = (
+        s(ctx, "t.page"),
+        s(ctx, "t.of"),
+        s(ctx, "brand.descriptor"),
+        s(ctx, "brand.tagline"),
+    );
+    let meta = pdf::Meta {
+        title,
+        footer: &footer,
+        page_word: &page,
+        of_word: &of,
+        producer: &producer,
+        descriptor: &descriptor,
+        tagline: &tagline,
+    };
+    match &run.signer {
+        Some(signer) => {
+            let f = |data: &[u8]| signer.sign_detached(data);
+            pdf::render(blocks, &meta, Some(&f))
+        }
+        None => pdf::render(blocks, &meta, None),
+    }
+}
+
+pub fn statistics_pdf(ctx: &Value, run: &RunInfo) -> Result<Vec<u8>, String> {
     let t = |k: &str| s(ctx, &format!("t.{}", k));
     let mut b = header(
         ctx,
@@ -540,17 +632,28 @@ pub fn statistics_pdf(ctx: &Value) -> Vec<u8> {
     for l in arr(ctx, "limitations") {
         b.push(Block::Bullet(l.as_str().unwrap_or_default().into()));
     }
+    b.push(Block::Heading(t("timestamp")));
+    let mut ts_rows = vec![(t("status"), s(ctx, "timestamp.status_label"))];
+    if !s(ctx, "timestamp.tsa").is_empty() {
+        ts_rows.push((t("tsa"), s(ctx, "timestamp.tsa")));
+    }
+    if !s(ctx, "timestamp.gen_time").is_empty() {
+        ts_rows.push((t("gen_time"), s(ctx, "timestamp.gen_time")));
+        ts_rows.push((t("covers"), format!("#{}", s(ctx, "timestamp.covers_seq"))));
+        ts_rows.push((t("audit_head"), s(ctx, "timestamp.head")));
+    }
+    ts_rows.push(signature_row(ctx));
+    b.push(Block::Kv(ts_rows));
     b.push(Block::Heading(t("audit")));
     b.push(Block::Kv(vec![
         (t("audit_head"), s(ctx, "audit.head")),
         (t("audit_entries"), s(ctx, "audit.entries")),
         (t("log_dir"), s(ctx, "audit.log_dir")),
     ]));
-    let (foot, page, of, producer) = pdf_footer(ctx);
-    pdf::render(&b, &t("title_statistics"), &foot, &page, &of, &producer)
+    finish(ctx, &t("title_statistics"), &b, run)
 }
 
-pub fn technical_pdf(ctx: &Value) -> Vec<u8> {
+pub fn technical_pdf(ctx: &Value, run: &RunInfo) -> Result<Vec<u8>, String> {
     let t = |k: &str| s(ctx, &format!("t.{}", k));
     let mut b = header(
         ctx,
@@ -607,16 +710,16 @@ pub fn technical_pdf(ctx: &Value) -> Vec<u8> {
             ),
         ),
         (t("log_dir"), s(ctx, "audit.log_dir")),
+        signature_row(ctx),
     ]));
     b.push(Block::Heading(t("limitations")));
     for l in arr(ctx, "limitations") {
         b.push(Block::Bullet(l.as_str().unwrap_or_default().into()));
     }
-    let (foot, page, of, producer) = pdf_footer(ctx);
-    pdf::render(&b, &t("title_technical"), &foot, &page, &of, &producer)
+    finish(ctx, &t("title_technical"), &b, run)
 }
 
-pub fn summary_pdf(ctx: &Value) -> Vec<u8> {
+pub fn summary_pdf(ctx: &Value, run: &RunInfo) -> Result<Vec<u8>, String> {
     let t = |k: &str| s(ctx, &format!("t.{}", k));
     let mut sub = s(ctx, "item.file_name");
     if !s(ctx, "run.case_id").is_empty() {
@@ -647,8 +750,129 @@ pub fn summary_pdf(ctx: &Value) -> Vec<u8> {
     )]));
     b.push(Block::Heading(t("next_steps")));
     b.push(Block::Para(s(ctx, "item.next_text")));
-    let (foot, page, of, producer) = pdf_footer(ctx);
-    pdf::render(&b, &t("title_summary"), &foot, &page, &of, &producer)
+    finish(ctx, &t("title_summary"), &b, run)
+}
+
+// ---------- Chain-of-custody form (one per item; jurisdiction language + English) ----------
+
+pub fn custody_context(lang: &str, run: &RunInfo, it: &ItemResult, audit: &AuditRef) -> Value {
+    let mut ctx = item_context(lang, run, it, audit);
+    let c = catalog(lang);
+    let j = if run.jurisdiction == "fr" { "fr" } else { "co" };
+    let mut cu = c.custody().clone();
+    let get = |k: &str| c.custody()[k].as_str().unwrap_or(k).to_string();
+    let mut params = BTreeMap::new();
+    for (k, v) in [
+        ("tool", run.tool_name.clone()),
+        ("version", run.tool_version.clone()),
+        ("run_id", run.run_id.clone()),
+        ("start", run.started_utc.clone()),
+        ("end", run.finished_utc.clone()),
+        ("first", it.audit_first_seq.to_string()),
+        ("last", it.audit_last_seq.to_string()),
+    ] {
+        params.insert(k.to_string(), v);
+    }
+    cu["title"] = json!(get(&format!("title_{}", j)));
+    cu["basis"] = json!(get(&format!("basis_{}", j)));
+    cu["case_label"] = json!(get(&format!("case_{}", j)));
+    cu["evidence_id_label"] = json!(get(&format!("evidence_id_{}", j)));
+    cu["evidence_id"] = json!(format!("{}-{:05}", run.run_id, it.index));
+    cu["jurisdiction_label"] = json!(c.ui(&format!("jur_{}", j)));
+    cu["operation_text"] = json!(crate::i18n::fill(&get("operation_text"), &params));
+    cu["blank_rows"] = json!((0..BLANK_TRANSFER_ROWS).collect::<Vec<_>>());
+    ctx["custody"] = cu;
+    ctx
+}
+
+pub fn custody_json(run: &RunInfo, it: &ItemResult) -> Value {
+    json!({
+        "schema": SCHEMA_CUSTODY,
+        "jurisdiction": run.jurisdiction,
+        "run_id": run.run_id, "case_id": run.case_id,
+        "evidence_id": format!("{}-{:05}", run.run_id, it.index),
+        "item": {"index": it.index, "path": it.path.display().to_string(), "file_name": it.file_name(), "size": it.size},
+        "hashes": it.hashes.iter().map(|(a, h)| (a.name().to_string(), json!(h))).collect::<serde_json::Map<_, _>>(),
+        "examiner": run.actor,
+        "operations": [{"tool": run.tool_name, "version": run.tool_version, "start_utc": run.started_utc, "end_utc": run.finished_utc,
+                        "audit_first_seq": it.audit_first_seq, "audit_last_seq": it.audit_last_seq}],
+        "transfers": [],
+    })
+}
+
+pub fn custody_pdf(ctx: &Value, run: &RunInfo) -> Result<Vec<u8>, String> {
+    let c = |k: &str| s(ctx, &format!("custody.{}", k));
+    let t = |k: &str| s(ctx, &format!("t.{}", k));
+    let mut b = vec![
+        Block::Title(c("title")),
+        Block::Subtitle(format!(
+            "{}: {} \u{00B7} {}: {}",
+            t("jurisdiction"),
+            c("jurisdiction_label"),
+            t("run_id"),
+            s(ctx, "run.run_id")
+        )),
+        Block::Note(c("basis")),
+        Block::Kv(vec![
+            (c("case_label"), s(ctx, "run.case_id")),
+            (c("evidence_id_label"), c("evidence_id")),
+            (
+                c("description"),
+                format!(
+                    "{} \u{00B7} {} bytes \u{00B7} {}",
+                    s(ctx, "item.file_name"),
+                    s(ctx, "item.size"),
+                    s(ctx, "item.detected_text")
+                ),
+            ),
+            (c("location"), s(ctx, "item.path")),
+        ]),
+        Block::Heading(c("integrity")),
+        Block::Kv(
+            arr(ctx, "hash_rows")
+                .iter()
+                .map(|h| (s(h, "algorithm"), s(h, "value")))
+                .collect(),
+        ),
+        Block::Heading(c("operations")),
+        Block::Para(c("operation_text")),
+        Block::Kv(vec![(c("examiner"), s(ctx, "run.actor"))]),
+        Block::Heading(c("transfers")),
+        Block::Grid {
+            header: vec![
+                c("date_time"),
+                c("delivered_by"),
+                c("received_by"),
+                c("purpose"),
+                c("condition"),
+            ],
+            widths: vec![80.0, 120.0, 120.0, 80.0, 95.0],
+            rows: BLANK_TRANSFER_ROWS,
+            row_h: 30.0,
+        },
+        Block::Heading(c("observations")),
+        Block::Grid {
+            header: vec![String::new()],
+            widths: vec![495.0],
+            rows: 2,
+            row_h: 30.0,
+        },
+        Block::SignLines(vec![
+            format!(
+                "{}: {} \u{2014} {}",
+                c("examiner"),
+                s(ctx, "run.actor"),
+                c("signature_line")
+            ),
+            format!("{} \u{2014} {}", c("received_by"), c("signature_line")),
+        ]),
+    ];
+    if s(ctx, "run.case_id").is_empty() {
+        if let Some(Block::Kv(rows)) = b.get_mut(3) {
+            rows[0].1 = String::new();
+        }
+    }
+    finish(ctx, &c("title"), &b, run)
 }
 
 // ---------- Writing ----------
@@ -719,13 +943,34 @@ pub fn write_item_reports(
         put(write_hashed(
             dir,
             &format!("technical.{}.pdf", lang),
-            &technical_pdf(&ctx),
+            &technical_pdf(&ctx, run)?,
             algos,
         ))?;
         put(write_hashed(
             dir,
             &format!("summary.{}.pdf", lang),
-            &summary_pdf(&ctx),
+            &summary_pdf(&ctx, run)?,
+            algos,
+        ))?;
+    }
+    put(write_hashed(
+        dir,
+        "custody.json",
+        &pretty(&custody_json(run, it)),
+        algos,
+    ))?;
+    for lang in custody_langs(&run.jurisdiction) {
+        let ctx = custody_context(&lang, run, it, audit);
+        put(write_hashed(
+            dir,
+            &format!("custody.{}.html", lang),
+            render_html("custody.html", &ctx)?.as_bytes(),
+            algos,
+        ))?;
+        put(write_hashed(
+            dir,
+            &format!("custody.{}.pdf", lang),
+            &custody_pdf(&ctx, run)?,
             algos,
         ))?;
     }
@@ -761,7 +1006,7 @@ pub fn write_statistics(
         let (n, d) = write_hashed(
             dir,
             &format!("statistics.{}.pdf", lang),
-            &statistics_pdf(&ctx),
+            &statistics_pdf(&ctx, run)?,
             algos,
         )?;
         files.insert(n, d);

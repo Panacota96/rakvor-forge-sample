@@ -54,6 +54,31 @@ impl AuditLog {
         })
     }
 
+    /// Re-opens an intact log to append later actions (e.g. a delayed timestamp).
+    pub fn resume(dir: &Path, actor: &str) -> Result<AuditLog, String> {
+        let path = dir.join("audit.jsonl");
+        let n = verify(&path)
+            .map_err(|p| format!("refusing to append to a broken audit log: {}", p[0]))?;
+        let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let last: Value =
+            serde_json::from_str(text.lines().last().unwrap_or("{}")).map_err(|e| e.to_string())?;
+        let open = |name: &str| {
+            OpenOptions::new()
+                .append(true)
+                .open(dir.join(name))
+                .map_err(|e| e.to_string())
+        };
+        Ok(AuditLog {
+            jsonl: open("audit.jsonl")?,
+            text: open("audit.log")?,
+            seq: n,
+            head: last["entry_hash"].as_str().unwrap_or_default().to_string(),
+            run_id: last["run_id"].as_str().unwrap_or_default().to_string(),
+            actor: actor.to_string(),
+            dir: dir.to_path_buf(),
+        })
+    }
+
     pub fn head(&self) -> &str {
         &self.head
     }
@@ -126,6 +151,21 @@ fn summarize(v: &Value) -> String {
             .join(" "),
         other => other.to_string(),
     }
+}
+
+/// seq -> entry_hash, to check what a timestamp covers.
+pub fn heads(path: &Path) -> std::collections::BTreeMap<u64, String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .map(|e| {
+            (
+                e["seq"].as_u64().unwrap_or(0),
+                e["entry_hash"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect()
 }
 
 /// Verifies a log. Ok(entry count) when intact, Err(list of problems) otherwise.

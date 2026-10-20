@@ -11,7 +11,20 @@ flowchart TB
     RUN --> I2["items/00002-…/"]
     I1 --> T1["technical.json<br/>technical.LANG.html · .pdf"]
     I1 --> C1["summary.json<br/>summary.LANG.html · .pdf"]
+    I1 --> K1["custody.json<br/>custody.es|fr + custody.en .html · .pdf"]
 ```
+
+Each item folder also holds a **chain-of-custody form** for the chosen jurisdiction (`--jurisdiction co|fr`)
+plus its English version — see [forensic-audit.md](forensic-audit.md#chain-of-custody-form-per-item).
+
+**Brand.** HTML and PDF reports carry the Rakvor header band (RV mark, descriptor
+*FORENSICS | INCIDENT RESPONSE | SECURITY* and the tagline in the report language) on a light, printable page.
+When `--sign-cert` is used, each PDF shows the signer and certificate fingerprint and carries a digital signature
+that Acrobat or `pyhanko sign validate` can check. The statistics report shows the trusted timestamp (or a warning
+that it is pending).
+
+**Size.** Item reports never list every other file: duplicate partners are capped at 10 names
+("… (+N)"); the complete groups are in the statistics report and `hashes.csv`.
 
 ## What each report contains
 

@@ -5,7 +5,40 @@ use predicates::prelude::*;
 use std::path::{Path, PathBuf};
 
 fn bin() -> Command {
-    Command::cargo_bin("rv-hashinv").unwrap()
+    let mut c = Command::cargo_bin("rv-hashinv").unwrap();
+    c.env("RV_NO_TIMESTAMP", "1"); // offline by default; trust_* tests use a local test TSA
+    c
+}
+
+/// Starts tests/fake_tsa.py (needs Python with pyhanko). Returns None to skip when unavailable.
+fn test_pki(dir: &Path) -> Option<(std::process::Child, String)> {
+    let py = std::env::var("RV_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fake_tsa.py");
+    let ok = std::process::Command::new(&py)
+        .args(["-c", "import pyhanko"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        eprintln!(
+            "skipping trust test: {} has no pyhanko (pip install pyhanko)",
+            py
+        );
+        return None;
+    }
+    let mut child = std::process::Command::new(&py)
+        .arg(&script)
+        .arg("serve")
+        .arg(dir)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+    let mut line = String::new();
+    use std::io::BufRead;
+    std::io::BufReader::new(child.stdout.take()?)
+        .read_line(&mut line)
+        .ok()?;
+    Some((child, line.trim().to_string()))
 }
 
 fn sample() -> PathBuf {
@@ -244,4 +277,95 @@ fn usage_doc_matches_help() {
         committed == generated,
         "docs/usage-cli.md is out of date: run `cargo run -p rv-hashinv-cli -- docs-cli > docs/usage-cli.md`"
     );
+}
+
+#[test]
+fn trust_timestamp_signature_and_custody_with_test_pki() {
+    let pki = tempfile::tempdir().unwrap();
+    let Some((mut tsa, url)) = test_pki(pki.path()) else {
+        return;
+    };
+    let out = tempfile::tempdir().unwrap();
+    bin()
+        .env_remove("RV_NO_TIMESTAMP")
+        .env("NO_PROXY", "127.0.0.1")
+        .env("RV_SIGN_PASSWORD", "test")
+        .args(["scan", "-i"])
+        .arg(sample())
+        .args([
+            "--jurisdiction",
+            "fr",
+            "--tsa-url",
+            &url,
+            "--progress",
+            "none",
+            "--sign-cert",
+        ])
+        .arg(pki.path().join("examiner.p12"))
+        .arg("-o")
+        .arg(out.path())
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("timestamp: ok"));
+    let logs = only_dir(&out.path().join("logs"));
+    bin()
+        .arg("verify-log")
+        .arg(&logs)
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("covers entry"));
+    let item = only_dir(&only_dir(&out.path().join("reports")).join("items"));
+    for f in [
+        "custody.json",
+        "custody.fr.pdf",
+        "custody.fr.html",
+        "custody.en.pdf",
+    ] {
+        assert!(item.join(f).is_file(), "{}", f);
+    }
+    let pdf = std::fs::read(item.join("technical.en.pdf")).unwrap();
+    assert!(String::from_utf8_lossy(&pdf).contains("/adbe.pkcs7.detached"));
+    // Tampering with the token is detected.
+    let tsr = std::fs::read_dir(&logs)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().is_some_and(|x| x == "tsr"))
+        .unwrap();
+    let mut b = std::fs::read(&tsr).unwrap();
+    let last = b.len() - 1;
+    b[last] ^= 0xff;
+    std::fs::write(&tsr, b).unwrap();
+    bin().arg("verify-log").arg(&logs).assert().code(3);
+    // Offline run: pending, then added later with `timestamp`.
+    let out2 = tempfile::tempdir().unwrap();
+    bin()
+        .env_remove("RV_NO_TIMESTAMP")
+        .args(["scan", "-i"])
+        .arg(sample())
+        .args([
+            "--tsa-url",
+            "http://127.0.0.1:9/tsr",
+            "--progress",
+            "none",
+            "-o",
+        ])
+        .arg(out2.path())
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("timestamp: pending"));
+    let logs2 = only_dir(&out2.path().join("logs"));
+    bin()
+        .env("NO_PROXY", "127.0.0.1")
+        .args(["timestamp"])
+        .arg(&logs2)
+        .args(["--tsa-url", &url])
+        .assert()
+        .code(0);
+    bin()
+        .arg("verify-log")
+        .arg(&logs2)
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("covers entry"));
+    let _ = tsa.kill();
 }
