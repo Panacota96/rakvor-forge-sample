@@ -1,5 +1,9 @@
 """The pipeline both front-ends call: intake -> hash + analyze each item -> duplicates ->
 hashes.csv -> per-item reports -> statistics report. Every step is written to the audit log.
+
+With `case_dir` the run works inside a shared case folder (see case.py): outputs go to
+<CASE>/runs/<tool>/<RUN-ID>/, the case log records run_started / run_finished, and depending on the
+role every item is registered (intake) or verified against the registry (analysis).
 """
 
 from __future__ import annotations
@@ -9,19 +13,22 @@ import io
 import os
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from . import case as casef
 from . import i18n
 from .analyzer import Finding, analyze
-from .audit import AuditLog
+from .audit import AuditLog, heads
 from .envinfo import describe
 from .events import Sink, eta_ms, event
 from .hashing import hash_bytes, hash_stream, validate_selection
 from .inputs import collect
 from .report import (
     AuditRef,
+    CaseInfo,
+    CaseTally,
     ItemResult,
     RunInfo,
     RunTotals,
@@ -57,6 +64,15 @@ class RunConfig:
     tsa_url: str | None = None  # RFC 3161 time-stamping authority; None = no timestamp
     sign_cert: Path | None = None  # examiner's .p12/.pfx for PDF signatures
     sign_password: str | None = field(default=None, repr=False)  # never logged
+    case_dir: Path | None = None  # shared case folder (--case-dir); None = standalone run in out_dir
+    evidence_ids: list[str] = field(default_factory=list)  # case only: E0001...; none + no input = every registered item
+    case_role: str = field(default_factory=lambda: _default_role())  # "intake" | "analysis" (default: core.CASE_ROLE)
+
+
+def _default_role() -> str:
+    from . import CASE_ROLE
+
+    return CASE_ROLE
 
 
 @dataclass
@@ -75,6 +91,186 @@ class RunSummary:
     log_dir: Path
     audit_head: str
     timestamp: dict = field(default_factory=lambda: {"status": "off"})
+    case: CaseInfo | None = None  # case folder runs: case id, role and how the items relate to the registry
+
+
+@dataclass
+class _CaseLink:
+    """A run linked to a case folder."""
+
+    case: casef.Case
+    writer: casef.Writer
+    run_rel: str  # "runs/<tool>/<RUN-ID>" (relative to the case folder, forward slashes)
+    run_dir: Path
+    started_seq: int
+    started_head: str
+    created: bool
+    requested_algorithms: list[str]
+    algo_change: tuple[str, str | None] | None
+    requested_jurisdiction: str
+    registry_sha256: str | None
+    by_evidence: dict[str, str]  # normalised path -> evidence id, for items selected with --evidence
+    tally: CaseTally = field(default_factory=CaseTally)
+
+    def info(self, role: str) -> CaseInfo:
+        return CaseInfo(self.case.case_id, role, str(self.case.dir), CaseTally(**vars(self.tally)))
+
+
+def _open_case(cfg: RunConfig, directory: Path, run_id: str) -> tuple[RunConfig, _CaseLink]:
+    """Opens (or creates) the case, resolves --evidence, applies the case rules to the configuration and appends
+    run_started to the case log. Nothing is written into a case that fails verification."""
+    writer = casef.Writer(cfg.tool_name, cfg.tool_version, run_id, cfg.actor)
+    ids = casef.parse_evidence_ids(cfg.evidence_ids)
+    case, created = casef.Case.open_or_create(directory, cfg.case_id, cfg.jurisdiction, writer)
+    case.check_ids(ids)
+    algos, change = casef.ensure_case_algorithm(list(cfg.algorithms), case.registry_algorithms())
+    c = replace(cfg, case_id=case.case_id, jurisdiction=case.jurisdiction, algorithms=algos, evidence_ids=ids, inputs=list(cfg.inputs))
+    by_evidence: dict[str, str] = {}
+    for eid in ids:
+        it = case.get(eid)
+        c.inputs.append(Path(it["path"]))
+        by_evidence[it["path"]] = eid
+    if not c.inputs and c.input_list is None:
+        c.inputs = [Path(i["path"]) for i in case.items]
+    run_rel = f"runs/{cfg.tool_name}/{run_id}"
+    started_seq, started_head = case.append(
+        writer,
+        "run_started",
+        {
+            "tool": cfg.tool_name,
+            "version": cfg.tool_version,
+            "run_dir": run_rel,
+            "frontend": cfg.frontend,
+            "role": cfg.case_role,
+            "evidence_ids": ids,
+        },
+    )
+    link = _CaseLink(
+        case,
+        writer,
+        run_rel,
+        Path(directory) / "runs" / cfg.tool_name / run_id,
+        started_seq,
+        started_head,
+        created,
+        list(cfg.algorithms),
+        change,
+        cfg.jurisdiction,
+        casef.registry_digest(directory),
+        by_evidence,
+    )
+    return c, link
+
+
+def _finish_case(link: _CaseLink, cfg: RunConfig, log_dir: Path, s: RunSummary | None, error: str | None, sink: Sink) -> None:
+    """Appends run_finished to the case log (also after a cancel or a failure). The audit head recorded here is
+    the run's final audit entry, read back from disk."""
+    try:
+        h = heads(log_dir / "audit.jsonl")
+    except OSError:
+        h = {}
+    entries = max(h) if h else 0
+    head = h.get(entries)
+    verification = dict(vars(link.tally))
+    base = {"tool": cfg.tool_name, "version": cfg.tool_version, "run_dir": link.run_rel, "audit_head": head, "audit_entries": entries}
+    if s is not None:
+        details = {
+            **base,
+            "status": "cancelled" if s.cancelled else "completed",
+            "timestamp_status": s.timestamp.get("status", "off"),
+            "totals": {"items": s.items, "bytes": s.bytes, "errors": s.errors, "high": s.high, "medium": s.medium, "low": s.low, "info": s.info},
+            "verification": verification,
+        }
+    else:
+        details = {**base, "status": "failed", "reason": error, "timestamp_status": "off", "totals": None, "verification": verification}
+    try:
+        link.case.append(link.writer, "run_finished", details)
+    except casef.CaseError as e:
+        sink(event("error", path=None, message=f"case log: run_finished not recorded: {e}"))
+
+
+def _case_check_item(link: _CaseLink, role: str, result: ItemResult, log: AuditLog, sink: Sink) -> None:
+    """Analysis: compares the fresh hashes with the registry (by --evidence id, else by path, else by content).
+    Intake: notes a registered path whose content changed. Findings are added to the item."""
+    norm = casef.normalize_path(result.path)
+    path_s = str(result.path)
+    if role == casef.INTAKE:
+        prev = link.case.find_by_path(norm)
+        if prev is not None and casef.compare(prev["hashes"], result.hashes).kind == "mismatch":
+            result.findings.append(Finding("REGISTRY_PATH_CONTENT_CHANGED", "medium", {"previous_id": prev["evidence_id"]}))
+        return
+    expected, by = None, ""
+    if norm in link.by_evidence:
+        expected, by = link.case.get(link.by_evidence[norm]), "evidence_id"
+    if expected is None:
+        expected, by = link.case.find_by_path(norm), "path"
+    if expected is None:
+        expected, by = link.case.find_by_content(result.hashes), "content"
+    if expected is None:
+        log.record("evidence_not_in_case_registry", path_s, {"index": result.index, "case_id": link.case.case_id})
+        result.findings.append(Finding("EVIDENCE_NOT_IN_CASE_REGISTRY", "medium", {"case_id": link.case.case_id}))
+        link.tally.unregistered += 1
+        status = "not_in_registry"
+    else:
+        eid = expected["evidence_id"]
+        result.evidence_id, result.intake_utc = eid, expected["registered_utc"]
+        cmp = casef.compare(expected["hashes"], result.hashes)
+        if cmp.kind == "match":
+            log.record(
+                "evidence_verified_against_case",
+                path_s,
+                {"index": result.index, "evidence_id": eid, "algorithm": "+".join(cmp.algorithms), "match": True, "matched_by": by},
+            )
+            link.tally.verified += 1
+            status = "verified"
+        else:
+            algo, exp, act = (cmp.algorithm, cmp.expected, cmp.actual) if cmp.kind == "mismatch" else ("none", "-", "-")
+            log.record(
+                "evidence_verified_against_case",
+                path_s,
+                {
+                    "index": result.index,
+                    "evidence_id": eid,
+                    "algorithm": algo,
+                    "match": False,
+                    "matched_by": by,
+                    "expected": exp,
+                    "actual": act,
+                },
+            )
+            result.findings.append(
+                Finding("EVIDENCE_HASH_MISMATCH_WITH_CASE", "high", {"evidence_id": eid, "algorithm": algo, "expected": exp, "actual": act})
+            )
+            link.tally.mismatched += 1
+            status = "mismatch"
+    result.case_status = status
+    sink(event("evidence_linked", index=result.index, path=path_s, evidence_id=result.evidence_id, status=status))
+
+
+def _register_items(link: _CaseLink, results: list[ItemResult], hashed_seq: dict[int, int], log: AuditLog, sink: Sink) -> None:
+    """Intake: registers every hashed item (same path + same content keeps its id) and audits each id."""
+    todo = [r for r in results if r.hashes]
+    if not todo:
+        return
+    regs = [casef.Registration(casef.normalize_path(r.path), r.size, list(r.hashes), hashed_seq.get(r.index, 0)) for r in todo]
+    try:
+        ids, case_seq = link.case.register(link.writer, regs)
+    except casef.CaseError as e:
+        log.record("error", None, {"stage": "case_registry", "message": str(e)})
+        log.record("run_failed", None, {"reason": str(e)})
+        raise
+    digest = casef.registry_digest(link.case.dir)
+    for r, (eid, added, utc) in zip(todo, ids, strict=True):
+        status = "registered" if added else "already_registered"
+        log.record(
+            "evidence_registered",
+            str(r.path),
+            {"index": r.index, "evidence_id": eid, "new": added, "case_log_seq": case_seq, "registry_sha256": digest},
+        )
+        link.tally.registered += 1
+        link.tally.added += int(added)
+        r.evidence_id, r.case_status, r.intake_utc = eid, status, utc
+        sink(event("evidence_linked", index=r.index, path=str(r.path), evidence_id=eid, status=status))
 
 
 def _new_run_id() -> str:
@@ -91,11 +287,28 @@ def run(cfg: RunConfig, sink: Sink, cancel: threading.Event) -> RunSummary:
         i18n.parse_langs(lang)
     if cfg.jurisdiction not in ("co", "fr"):
         raise ValueError(f"unknown jurisdiction '{cfg.jurisdiction}': use co or fr")
+    if cfg.case_role not in casef.ROLES:
+        raise ValueError(f"unknown case role '{cfg.case_role}': use intake or analysis")
+    run_id = _new_run_id()
+    if cfg.case_dir is None:
+        out = Path(cfg.out_dir)
+        return _pipeline(cfg, sink, cancel, run_id, out / "logs" / run_id, out / "reports" / run_id, None)
+    cfg, link = _open_case(cfg, Path(cfg.case_dir), run_id)
+    log_dir, report_dir = link.run_dir / "logs", link.run_dir / "reports"
+    try:
+        summary = _pipeline(cfg, sink, cancel, run_id, log_dir, report_dir, link)
+    except Exception as e:
+        _finish_case(link, cfg, log_dir, None, str(e), sink)
+        raise
+    _finish_case(link, cfg, log_dir, summary, None, sink)
+    return summary
+
+
+def _pipeline(
+    cfg: RunConfig, sink: Sink, cancel: threading.Event, run_id: str, log_dir: Path, report_dir: Path, link: _CaseLink | None
+) -> RunSummary:
     started = time.monotonic()
     started_utc = utc_now()
-    run_id = _new_run_id()
-    log_dir = Path(cfg.out_dir) / "logs" / run_id
-    report_dir = Path(cfg.out_dir) / "reports" / run_id
     log = AuditLog(log_dir, run_id, cfg.actor)
 
     def elapsed() -> int:
@@ -119,8 +332,40 @@ def run(cfg: RunConfig, sink: Sink, cancel: threading.Event) -> RunSummary:
                 "jurisdiction": cfg.jurisdiction,
                 "tsa_url": cfg.tsa_url,
                 "sign_cert": str(cfg.sign_cert) if cfg.sign_cert else None,
+                "case_dir": str(cfg.case_dir) if cfg.case_dir is not None else None,
+                "evidence_ids": list(cfg.evidence_ids),
             },
         )
+        if link is not None:
+            log.record(
+                "case_linked",
+                None,
+                {
+                    "case_id": link.case.case_id,
+                    "case_dir": str(link.case.dir),
+                    "role": cfg.case_role,
+                    "run_dir": link.run_rel,
+                    "case_created": link.created,
+                    "case_log_seq_at_start": link.started_seq,
+                    "case_log_head_at_start": link.started_head,
+                    "registry_sha256": link.registry_sha256,
+                    "registry_items": len(link.case.items),
+                    "jurisdiction": link.case.jurisdiction,
+                    "requested_jurisdiction": link.requested_jurisdiction,
+                },
+            )
+            if link.algo_change is not None:
+                log.record(
+                    "case_algorithm_added",
+                    None,
+                    {
+                        "requested": link.requested_algorithms,
+                        "added": link.algo_change[0],
+                        "replaced": link.algo_change[1],
+                        "algorithms": cfg.algorithms,
+                        "registry_algorithms": link.case.registry_algorithms(),
+                    },
+                )
         for action, details in cfg.preamble:
             log.record(action, None, details)
         _, env_digest = write_hashed(
@@ -166,6 +411,7 @@ def run(cfg: RunConfig, sink: Sink, cancel: threading.Event) -> RunSummary:
         )
 
         results: list[ItemResult] = []
+        hashed_seq: dict[int, int] = {}
         bytes_before, errors, cancelled = 0, 0, False
         last_progress = [0.0]
         for item in items:
@@ -222,7 +468,7 @@ def run(cfg: RunConfig, sink: Sink, cancel: threading.Event) -> RunSummary:
                 except OSError:
                     unchanged = False
                 hashes = dict(sorted(outcome.digests))
-                log.record(
+                hashed_seq[item.index] = log.record(
                     "item_hashed",
                     path_s,
                     {"index": item.index, "bytes_read": outcome.bytes, "hashes": hashes, "mtime_unchanged": unchanged},
@@ -231,6 +477,8 @@ def run(cfg: RunConfig, sink: Sink, cancel: threading.Event) -> RunSummary:
                 a = analyze(result.file_name, outcome.bytes, outcome.head)
                 result.size, result.hashes = outcome.bytes, outcome.digests
                 result.detected_type, result.extension, result.findings = a.detected_type, a.extension, a.findings
+                if link is not None:
+                    _case_check_item(link, cfg.case_role, result, log, sink)
             result.audit_last_seq = log.record(
                 "item_analyzed",
                 path_s,
@@ -270,6 +518,10 @@ def run(cfg: RunConfig, sink: Sink, cancel: threading.Event) -> RunSummary:
             log.record("run_cancelled", None, {"processed": len(results), "of": total_items, "frontend": cfg.frontend})
             sink(event("cancelled", done=len(results), elapsed_ms=elapsed()))
 
+        # Intake: register every successfully hashed item in the case registry (under the case lock).
+        if link is not None and cfg.case_role == casef.INTAKE:
+            _register_items(link, results, hashed_seq, log, sink)
+
         primary = cfg.algorithms[0]
         for digest, idx in duplicate_groups(results):
             names = [results[i].file_name for i in idx]
@@ -302,6 +554,7 @@ def run(cfg: RunConfig, sink: Sink, cancel: threading.Event) -> RunSummary:
             cancelled,
             jurisdiction=cfg.jurisdiction,
             signer=signer,
+            case=link.info(cfg.case_role) if link is not None else None,
         )
         for r in results:
             files = write_item_reports(report_dir / "items" / r.folder, info, r, AuditRef(log.head, log.seq, str(log_dir)))
@@ -368,6 +621,7 @@ def run(cfg: RunConfig, sink: Sink, cancel: threading.Event) -> RunSummary:
             log_dir,
             log.head,
             info.timestamp,
+            info.case,
         )
     finally:
         log.close()

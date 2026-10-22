@@ -24,13 +24,15 @@ from rich.progress import (
 )
 
 from . import TOOL_NAME, __version__
-from .core import RunConfig, run
-from .core.audit import AuditLog, heads, verify
+from .core import CASE_ROLE, RunConfig, run
+from .core import case as casef
+from .core.audit import AuditLog
 from .core.envinfo import os_user
 from .core.hashing import ALGORITHMS, KNOWN_ANSWERS, parse, self_test, validate_selection
 from .core.i18n import parse_langs
 from .core.timeutil import human_duration
-from .core.trust import DEFAULT_TSA, TimestampError, timestamp_head, verify_timestamps
+from .core.trust import DEFAULT_TSA, TimestampError, timestamp_head
+from .core.verify import verify_log as verify_audit_log
 
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_FINDINGS, EXIT_CANCELLED = 0, 1, 2, 3, 130
 HELP_WIDTH = 100
@@ -44,7 +46,11 @@ DESCRIPTION:
        another name and duplicated content;
     4. writes a technical report and a customer-friendly summary (HTML, PDF and JSON).
   Each run also writes a statistics report and an audit trail under <OUT>/logs/<RUN-ID>/.
-  Every action is appended to a hash-chained log that `rv-hashinv verify-log` can check later."""
+  Every action is appended to a hash-chained log that `rv-hashinv verify-log` can check later.
+
+  CASE FOLDER (--case-dir): Rakvor tools share one folder per case. rv-hashinv is the intake tool: it
+  registers every hashed file in evidence/registry.json (evidence ids E0001, E0002, ...) so later tools
+  can prove they examined bit-identical copies. `rv-hashinv verify-case <CASE>` checks it all."""
 
 SCAN_EPILOG = """\b
 EXAMPLES:
@@ -56,14 +62,23 @@ EXAMPLES:
     rv-hashinv scan --input-list files.txt --lang all --progress jsonl > events.jsonl
   Verify the audit log afterwards:
     rv-hashinv verify-log rakvor-out/logs/<RUN-ID>/audit.jsonl
+  Open a case folder and register the evidence (intake), then verify the whole case:
+    rv-hashinv scan -i D:\\evidence -r --case-dir E:\\CASE-014 --case CASE-014 --jurisdiction fr
+    rv-hashinv verify-case E:\\CASE-014
+  Re-examine two registered items of the case:
+    rv-hashinv scan --case-dir E:\\CASE-014 --evidence E0001,E0002
 
 \b
 EXIT CODES:
   0    Completed; no high-severity finding.
-  1    Runtime error (input not found, output not writable, ...). See the audit log.
+  1    Runtime error (input not found, output not writable, case log locked, ...).
+       See the audit log.
   2    Usage error (unknown option, more than two hash algorithms, unsupported language).
+       With --case-dir: folder of another case or schema, --case missing when creating the
+       case, unknown evidence id.
   3    Completed with at least one high-severity finding (e.g. unreadable file, program under
-       another name).
+       another name, evidence that differs from the case registry), or the case folder fails
+       verification (nothing is written to it).
   130  Cancelled with Ctrl+C. Partial reports and the cancellation are written to the audit log.
 
 \b
@@ -77,18 +92,30 @@ FILES WRITTEN:
   <OUT>/reports/<RUN-ID>/items/<NNNNN>-<NAME>/summary.json|.<LANG>.html|.<LANG>.pdf
   <OUT>/reports/<RUN-ID>/items/<NNNNN>-<NAME>/custody.json|.<es|fr>.html|.pdf|.en.html|.pdf
   <OUT>/logs/<RUN-ID>/timestamp-<SEQ>.tsr|.json  RFC 3161 token for the audit chain head.
+  With --case-dir <CASE>, logs/ and reports/ go to <CASE>/runs/rv-hashinv/<RUN-ID>/, plus:
+  <CASE>/case.json                        Case id, jurisdiction, creation (written once).
+  <CASE>/case-log.jsonl                   Hash-chained case log of every tool: case_created,
+                                          run_started, evidence_registered, run_finished.
+  <CASE>/evidence/registry.json|.csv      Evidence registry: E0001..., path, size, hashes.
 
 \b
 FORENSIC NOTES:
   - Evidence is opened read-only and never modified; modification times are compared before and after.
   - Work on a verified copy (write-blocked image or export), not on original media.
   - Each audit entry stores the SHA-256 of the previous one; editing, deleting or re-ordering any
-    line is detected by `verify-log`. Keep the log folder with the reports.
+    line is detected by `verify-log`. Removing the last lines is detected only against a record
+    kept outside the log: the RFC 3161 timestamp or, with --case-dir, the case log. Keep the log
+    folder with the reports.
   - A file without findings is not proven authentic; read the Limitations section of each report.
   - MD5 and SHA-1 are accepted for compatibility with older case files; pair them with SHA-256 or BLAKE3.
   - The chain head is timestamped by an RFC 3161 authority (proves when the log existed). Offline? The run
     finishes with `timestamp_pending`; run `rv-hashinv timestamp <LOG>` later.
-  - With --sign-cert every PDF is signed with the examiner's certificate; the password is never logged."""
+  - With --sign-cert every PDF is signed with the examiner's certificate; the password is never logged.
+  - Case folder: every tool re-verifies case-log.jsonl and the registry digest before
+    writing, and refuses a broken case (exit 3). Appends happen under case-log.lock; a lock
+    older than 10 minutes is reported as stale and never deleted automatically.
+  - Each run's audit.jsonl records case_linked (the case-log entry it started from); the case
+    log records the run's final audit head, so the two chains vouch for each other."""
 
 CONTEXT = {"help_option_names": ["-h", "--help"], "max_content_width": HELP_WIDTH, "terminal_width": HELP_WIDTH}
 
@@ -119,7 +146,7 @@ def cli() -> None:
     help=_opt_help(
         "File or folder to review. Repeat for several. Folders are reviewed one level deep unless "
         "--recursive is given. Symbolic links are not followed.",
-        "none (required unless --input-list is given)",
+        "none (required unless --input-list, --case-dir or --evidence is given)",
         "--input D:\\evidence --input E:\\phone-export\\chat.txt",
     ),
 )
@@ -160,7 +187,9 @@ def cli() -> None:
     default=Path("rakvor-out"),
     show_default=False,
     metavar="DIR",
-    help=_opt_help("Folder where logs/ and reports/ are created. Created if missing.", "./rakvor-out", "--out E:\\case-014\\rv-hashinv"),
+    help=_opt_help(
+        "Folder where logs/ and reports/ are created (if missing). Not used with --case-dir.", "./rakvor-out", "--out E:\\case-014\\rv-hashinv"
+    ),
 )
 @click.option(
     "-l",
@@ -184,7 +213,12 @@ def cli() -> None:
     "--case",
     "case_id",
     metavar="ID",
-    help=_opt_help("Case or engagement identifier printed on the reports.", "none", "--case CASE-2026-014"),
+    help=_opt_help(
+        "Case or engagement identifier printed on the reports. With --case-dir it names the case when the folder is created, "
+        "and must match case.json afterwards (it can be left out).",
+        "none",
+        "--case CASE-2026-014",
+    ),
 )
 @click.option(
     "-p",
@@ -206,7 +240,8 @@ def cli() -> None:
     default="co",
     metavar="CC",
     help=_opt_help(
-        "Chain-of-custody form per item: co (Colombia, Fiscalía style, Spanish) or fr (France, scellés, French); an English copy is always added.",
+        "Chain-of-custody form per item: co (Colombia, Fiscalía style, Spanish) or fr (France, scellés, French); an English copy is always added. "
+        "In a case folder (--case-dir) the case's jurisdiction applies.",
         "co",
         "--jurisdiction fr",
     ),
@@ -240,6 +275,30 @@ def cli() -> None:
     metavar="VAR",
     help=_opt_help("Environment variable holding the certificate password.", "RV_SIGN_PASSWORD", "--sign-pass-env CERT_PASS"),
 )
+@click.option(
+    "--case-dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    metavar="DIR",
+    help=_opt_help(
+        "Shared case folder that links the Rakvor tools of one case (created with --case if missing). Outputs go to "
+        "<DIR>/runs/rv-hashinv/<RUN-ID>/; every hashed file is registered in <DIR>/evidence/registry.json; the run is "
+        "recorded in <DIR>/case-log.jsonl. With no --input, every registered item is examined.",
+        "none (standalone run in --out)",
+        "--case-dir E:\\CASE-014 --case CASE-014",
+    ),
+)
+@click.option(
+    "-E",
+    "--evidence",
+    "evidence",
+    multiple=True,
+    metavar="IDS",
+    help=_opt_help(
+        "Registered evidence ids to examine (needs --case-dir), comma-separated or repeated.",
+        "none (the --input files, or every registered item)",
+        "--evidence E0001,E0007",
+    ),
+)
 @click.pass_context
 def scan(
     ctx,
@@ -257,6 +316,8 @@ def scan(
     no_timestamp,
     sign_cert,
     sign_pass_env,
+    case_dir,
+    evidence,
 ) -> None:
     algos: list[str] = []
     for h in (x for raw in (hashes or ("sha256",)) for x in raw.split(",") if x.strip()):
@@ -269,8 +330,23 @@ def scan(
         langs = parse_langs(lang)
     except ValueError as e:
         _usage(str(e))
-    if not inputs and not input_list:
+    if not inputs and not input_list and case_dir is None:
         _usage("no input given: use --input FILE|FOLDER or --input-list FILE")
+    try:
+        evidence_ids = casef.parse_evidence_ids(list(evidence))
+    except casef.CaseError as e:
+        _usage(str(e))
+    if evidence_ids and case_dir is None:
+        _usage("--evidence needs --case-dir")
+    if case_dir is not None:
+        # Case problems found before the run map to their own exit codes (2 usage, 3 broken case).
+        try:
+            casef.preflight(case_dir, case_id, evidence_ids)
+        except casef.CaseError as e:
+            if e.exit_code == EXIT_USAGE:
+                _usage(str(e))
+            click.echo(f"error: {e}", err=True)
+            ctx.exit(e.exit_code)
 
     cancel = threading.Event()
     signal.signal(signal.SIGINT, lambda *_: cancel.set())
@@ -291,6 +367,9 @@ def scan(
         tsa_url=None if no_timestamp else tsa_url,
         sign_cert=sign_cert,
         sign_password=_password(sign_cert, sign_pass_env),
+        case_dir=case_dir,
+        evidence_ids=evidence_ids,
+        case_role=CASE_ROLE,
     )
 
     err = Console(stderr=True)
@@ -350,6 +429,12 @@ def scan(
                 f"  timestamp: {s.timestamp['status']}{' ' + s.timestamp.get('gen_time', '') if s.timestamp['status'] == 'ok' else ''}\n"
                 f"  report: {s.report_dir / f'statistics.{langs[0]}.html'}\n  logs:   {s.log_dir}"
             )
+            if s.case is not None:
+                t = s.case.tally
+                click.echo(
+                    f"  case:   {s.case.case_id} ({s.case.role}) registered {t.registered} (new {t.added}), verified {t.verified}, "
+                    f"mismatched {t.mismatched}, not in registry {t.unregistered}"
+                )
         except OSError:
             pass
     ctx.exit(EXIT_CANCELLED if s.cancelled else EXIT_FINDINGS if s.high else EXIT_OK)
@@ -357,38 +442,103 @@ def scan(
 
 @cli.command(
     "verify-log",
-    short_help="Verify that an audit log has not been edited, truncated or re-ordered.",
-    epilog="\b\nEXAMPLES:\n  rv-hashinv verify-log rakvor-out/logs/20261019T101500Z-a1b2c3/audit.jsonl\n"
-    "  rv-hashinv verify-log rakvor-out/logs/20261019T101500Z-a1b2c3\n\n\b\nEXIT CODES:\n"
-    "  0  The chain is intact.\n  1  The log cannot be read.\n"
-    "  3  The chain is broken: at least one entry was edited, deleted or re-ordered.",
+    short_help="Verify an audit log (audit.jsonl): edited, deleted or re-ordered entries, and truncation.",
+    epilog="\b\nCHECKS:\n"
+    "  - every entry links to the previous one (hash chain): an edited, deleted or re-ordered entry\n"
+    "    breaks it;\n"
+    "  - every timestamp token (timestamp-<SEQ>.tsr) covers the hash of the entry it names, and every\n"
+    "    timestamp_obtained entry still has its token file;\n"
+    "  - truncation: a chain alone cannot show that entries were removed from its end. The log must\n"
+    "    still contain the entry covered by its RFC 3161 timestamp (covers_seq) and, for a run inside\n"
+    "    a case folder (<CASE>/runs/<TOOL>/<RUN-ID>/logs), end with the audit head that the case log\n"
+    "    recorded at run_finished (only timestamp_obtained may follow). Entries after the last\n"
+    "    anchored one are listed as not provable; with neither record the output says\n"
+    '    "truncation not detectable without a timestamp or case record".\n\n'
+    "\b\nEXAMPLES:\n  rv-hashinv verify-log rakvor-out/logs/20261019T101500Z-a1b2c3/audit.jsonl\n"
+    "  rv-hashinv verify-log rakvor-out/logs/20261019T101500Z-a1b2c3\n"
+    "  rv-hashinv verify-log E:\\CASE-014\\runs\\rv-hashinv\\20261019T101500Z-a1b2c3\\logs\n\n\b\nEXIT CODES:\n"
+    "  0  The chain is intact and agrees with its timestamps and case record (if any).\n  1  The log cannot be read.\n"
+    "  3  The chain is broken (an entry was edited, deleted or re-ordered), a timestamp does not\n"
+    "     match, or the log is shorter than its timestamp or case record says (truncated).",
 )
 @click.argument("log", type=click.Path(path_type=Path), metavar="LOG")
 @click.pass_context
 def verify_log(ctx, log: Path) -> None:
-    """Verify that an audit log (audit.jsonl) has not been edited, truncated or re-ordered.
+    """Verify an audit log (audit.jsonl): edited, deleted or re-ordered entries, and truncation.
 
     LOG is the path to audit.jsonl, or to the run's log folder that contains it.
     Example: rakvor-out/logs/20261019T101500Z-a1b2c3
     """
     path = log / "audit.jsonl" if log.is_dir() else log
     try:
-        n, problems = verify(path)
+        v = verify_audit_log(path)
     except OSError as e:
         click.echo(f"error: cannot open {path}: {e}", err=True)
         ctx.exit(EXIT_ERROR)
-    problems += verify_timestamps(path.parent, heads(path)) if not problems else []
-    stamps = sorted(path.parent.glob("timestamp-*.json"))
-    if not problems:
-        click.echo(f"OK  {n} entries, chain intact: {path}")
-        for st in stamps:
-            m = json.loads(st.read_text(encoding="utf-8"))
-            click.echo(f"    timestamp {m['gen_time']} by {m['tsa']} covers entry #{m['covers_seq']}")
-        ctx.exit(EXIT_OK)
-    click.echo(f"BROKEN  {path}")
-    for p in problems:
-        click.echo(f"  - {p}")
-    ctx.exit(EXIT_FINDINGS)
+    if not v.problems:
+        click.echo(f"OK  {v.entries} entries, chain intact: {path}")
+        for t in v.timestamps:
+            click.echo(f"    {t}")
+        click.echo(f"    {v.truncation}")
+    else:
+        click.echo(f"BROKEN  {path}")
+        for p in v.problems:
+            click.echo(f"  - {p}")
+    for w in v.warnings:
+        click.echo(f"  warning: {w}")
+    ctx.exit(EXIT_FINDINGS if v.problems else EXIT_OK)
+
+
+@cli.command(
+    "verify-case",
+    short_help="Verify a whole case folder: case log, evidence registry and every run's audit log.",
+    epilog="\b\nCHECKS:\n"
+    "  - case-log.jsonl is an intact hash chain starting with case_created; case.json is unchanged;\n"
+    "  - evidence/registry.json has the SHA-256 recorded at the last registry change;\n"
+    "  - every run announced in the case log has an intact audit.jsonl (and valid timestamp\n"
+    "    tokens), its case_linked entry points to its run_started entry, and the audit head\n"
+    "    recorded at run_finished is its final entry (only timestamp_obtained may follow);\n"
+    "  - with --rehash: every registered item still reachable at its registered path is read again\n"
+    "    and its digests are compared with the registry (the latest registration of a path).\n\n"
+    "\b\nEXAMPLES:\n  rv-hashinv verify-case E:\\CASE-014\n  rv-hashinv verify-case E:\\CASE-014 --rehash\n\n\b\nEXIT CODES:\n"
+    "  0  The case folder is intact (warnings, e.g. a run still in progress or an item not\n"
+    "     reachable for --rehash, are printed).\n"
+    "  1  The folder is not a case folder (no case.json).\n"
+    "  3  At least one check failed: the case was edited, truncated or re-ordered, or (--rehash)\n"
+    "     an evidence file differs from the registry.",
+)
+@click.argument("case_dir", type=click.Path(path_type=Path), metavar="CASE")
+@click.option(
+    "--rehash",
+    is_flag=True,
+    help=_opt_help(
+        "Also re-hash every registered item still reachable and compare it with the registry.",
+        "off (only the registry's digest is checked)",
+        "--rehash",
+    ),
+)
+@click.pass_context
+def verify_case_cmd(ctx, case_dir: Path, rehash: bool) -> None:
+    """Verify a whole case folder: case log, evidence registry and every run's audit log.
+
+    CASE is the case folder (the one that holds case.json). Example: E:\\CASE-014
+    """
+    if not (case_dir / casef.CASE_FILE).is_file():
+        click.echo(f"error: {case_dir} is not a case folder (no {casef.CASE_FILE})", err=True)
+        ctx.exit(EXIT_ERROR)
+    v = casef.verify_case(case_dir)
+    r = casef.rehash_registry(case_dir, v) if rehash else None
+    if not v.problems:
+        click.echo(f"OK  case {v.case_id}: {v.entries} case-log entries, {v.registry_items} registered items, {v.runs} runs verified: {case_dir}")
+    else:
+        click.echo(f"BROKEN  case {v.case_id}: {case_dir}")
+        for p in v.problems:
+            click.echo(f"  - {p}")
+    if r is not None:
+        click.echo(f"    re-hashed {r.checked} of {r.registered} registered items: {r.matched} match the registry")
+    for w in v.warnings:
+        click.echo(f"  warning: {w}")
+    ctx.exit(EXIT_FINDINGS if v.problems else EXIT_OK)
 
 
 @cli.command(
@@ -397,9 +547,9 @@ def verify_log(ctx, log: Path) -> None:
     epilog="\b\nEXAMPLES:\n  rv-hashinv timestamp rakvor-out/logs/20261019T101500Z-a1b2c3\n"
     "  rv-hashinv timestamp rakvor-out/logs/20261019T101500Z-a1b2c3 --tsa-url https://freetsa.org/tsr\n\n\b\nEXIT CODES:\n"
     "  0  Timestamp obtained and logged.\n  1  The TSA could not be reached (nothing changed; try again).\n"
-    "  3  The log is broken: no timestamp is added to a broken chain.",
+    "  3  The log is missing or broken: no timestamp is added.",
 )
-@click.argument("log", type=click.Path(path_type=Path, exists=True), metavar="LOG")
+@click.argument("log", type=click.Path(path_type=Path), metavar="LOG")
 @click.option(
     "--tsa-url",
     default=DEFAULT_TSA,
@@ -419,9 +569,12 @@ def timestamp_cmd(ctx, log: Path, tsa_url: str, actor: str | None) -> None:
     LOG is the run's log folder (or its audit.jsonl). Example: rakvor-out/logs/20261019T101500Z-a1b2c3
     """
     d = log.parent if log.is_file() else log
+    if not (d / "audit.jsonl").is_file():
+        click.echo(f"error: no audit log at {d / 'audit.jsonl'}: nothing to timestamp", err=True)
+        ctx.exit(EXIT_FINDINGS)
     try:
         audit = AuditLog.resume(d, actor or os_user())
-    except ValueError as e:
+    except (ValueError, OSError) as e:
         click.echo(f"error: {e}", err=True)
         ctx.exit(EXIT_FINDINGS)
     try:
@@ -461,12 +614,13 @@ def docs_cli() -> None:
 def docs_markdown() -> str:
     out = [
         "# Command-line reference\n\n<!-- Generated by `rv-hashinv docs-cli`. Do not edit by hand: CI fails if this file differs. -->\n\n",
-        "```mermaid\nflowchart LR\n  A[rv-hashinv] --> B[scan]\n  A --> C[verify-log]\n  A --> D[self-test]\n  A --> T[timestamp]\n  T --> E\n"
-        "  B --> E[(logs/RUN-ID)]\n  B --> F[(reports/RUN-ID)]\n  C --> E\n```\n\n",
+        "```mermaid\nflowchart LR\n  A[rv-hashinv] --> B[scan]\n  A --> C[verify-log]\n  A --> D[self-test]\n  A --> T[timestamp]\n"
+        "  A --> V[verify-case]\n  T --> E\n  B --> E[(logs/RUN-ID)]\n  B --> F[(reports/RUN-ID)]\n  B -. --case-dir .-> K[(CASE folder)]\n"
+        "  V --> K\n  C --> E\n```\n\n",
     ]
     root = click.Context(cli, info_name=TOOL_NAME, **{k: v for k, v in CONTEXT.items() if k != "help_option_names"})
     out.append(f"## rv-hashinv\n\n```text\n{cli.get_help(root).rstrip()}\n```\n\n")
-    for name in ("scan", "verify-log", "timestamp", "self-test"):
+    for name in ("scan", "verify-log", "timestamp", "self-test", "verify-case"):
         cmd = cli.commands[name]
         sub = click.Context(cmd, info_name=name, parent=root, **{k: v for k, v in CONTEXT.items() if k != "help_option_names"})
         out.append(f"## rv-hashinv {name}\n\n```text\n{cmd.get_help(sub).rstrip()}\n```\n\n")

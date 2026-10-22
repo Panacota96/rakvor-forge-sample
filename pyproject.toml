@@ -5,7 +5,7 @@ name = "rv-hashinv"
 dynamic = ["version"]
 description = "Evidence inventory for digital forensics: dual hashing, hash-chained audit log, per-item technical and customer reports."
 readme = "README.md"
-license = "Apache-2.0"
+license = "LicenseRef-Rakvor-Audit"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Rakvor" }]
 requires-python = ">=3.11"

@@ -8,10 +8,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .. import TOOL_NAME, __version__
-from ..core import RunConfig
+from ..core import CASE_ROLE, RunConfig
+from ..core import case as casef
 from ..core.envinfo import os_user
 from ..core.hashing import ALGORITHMS, MAX_SELECTED, validate_selection
-from ..core.i18n import catalog, parse_langs
+from ..core.i18n import catalog, label, parse_langs
 from ..core.timeutil import human_duration, utc_now
 from ..core.trust import DEFAULT_TSA
 
@@ -41,6 +42,16 @@ class Outcome:
 
 
 @dataclass
+class EvidenceLink:
+    """One item's link to the case registry, shown in the result panel."""
+
+    index: int
+    path: str
+    evidence_id: str | None
+    status: str  # registered | already_registered | verified | mismatch | not_in_registry
+
+
+@dataclass
 class GuiState:
     inputs: list[Path] = field(default_factory=list)
     recursive: bool = True
@@ -62,6 +73,8 @@ class GuiState:
     tsa_url: str = DEFAULT_TSA
     sign_cert: str = ""
     sign_password: str = field(default="", repr=False)  # kept in memory only, never logged
+    case_dir: str = ""  # shared case folder; when set, the output folder is derived from it and locked
+    evidence: list[EvidenceLink] = field(default_factory=list)  # evidence ids reported by the last run
 
     def tr(self, key: str) -> str:
         return catalog(self.ui_lang)["ui"].get(key, key)
@@ -133,14 +146,35 @@ class GuiState:
             self.recursive = value
             self._note("ui_recursive_changed", {"recursive": value})
 
+    def set_case_dir(self, path: str) -> None:
+        """Rule: with a case folder the output folder is <case>/runs/<tool>/<RUN-ID> and cannot be edited."""
+        path = path.strip().strip('"')
+        if path != self.case_dir:
+            self.case_dir = path
+            self._note("ui_case_dir_changed", {"path": path or None, "role": CASE_ROLE})
+
+    @property
+    def out_locked(self) -> bool:
+        return bool(self.case_dir.strip())
+
+    def out_dir_display(self) -> str:
+        """What the output-folder field shows: the derived run folder when a case folder is set."""
+        return str(Path(self.case_dir.strip()) / "runs" / TOOL_NAME / "<RUN-ID>") if self.out_locked else self.out_dir
+
+    def evidence_lines(self) -> list[str]:
+        """Result-panel lines: "E0001  acta.txt  — Verified: identical to the registered evidence"."""
+        return [f"{e.evidence_id or '—'}  {Path(e.path).name}  — {label(self.ui_lang, f'case_status_{e.status}')}" for e in self.evidence]
+
     def can_start(self) -> bool:
-        return not self.running and bool(self.inputs) and bool(self.out_dir.strip())
+        return not self.running and (bool(self.inputs) or self.out_locked) and (self.out_locked or bool(self.out_dir.strip()))
 
     def to_config(self) -> RunConfig:
         """Builds the run configuration; recorded UI actions become audit preamble entries."""
-        if not self.inputs:
+        if not self.inputs and not self.out_locked:
             raise ValueError("Add at least one file or folder.")
         validate_selection(self.selected)
+        if self.out_locked:
+            casef.preflight(Path(self.case_dir.strip()), self.case_id.strip() or None, [])
         langs = parse_langs(self.lang)
         if self.sign_cert and not Path(self.sign_cert).is_file():
             raise ValueError(f"Signing certificate not found: {self.sign_cert}")
@@ -155,6 +189,7 @@ class GuiState:
                     "jurisdiction": self.jurisdiction,
                     "timestamp": self.timestamp,
                     "pdf_signing": bool(self.sign_cert),
+                    "case_dir": self.case_dir.strip() or None,
                     "at_utc": utc_now(),
                 },
             )
@@ -165,7 +200,8 @@ class GuiState:
             "hash=" + ",".join(self.selected),
             f"lang={self.lang}",
             f"recursive={str(self.recursive).lower()}",
-            f"out={self.out_dir.strip()}",
+            f"out={self.out_dir_display().strip()}",
+            f"case_dir={self.case_dir.strip() or 'none'}",
             f"jurisdiction={self.jurisdiction}",
             f"tsa={self.tsa_url if self.timestamp else 'off'}",
             f"sign_cert={self.sign_cert or 'none'}",
@@ -187,11 +223,14 @@ class GuiState:
             tsa_url=self.tsa_url if self.timestamp else None,
             sign_cert=Path(self.sign_cert) if self.sign_cert else None,
             sign_password=self.sign_password or None,
+            case_dir=Path(self.case_dir.strip()) if self.out_locked else None,
+            case_role=CASE_ROLE,
         )
 
     def start(self) -> None:
         self.phase, self.error = "running", ""
         self.progress, self.current_item, self.warnings, self.outcome = Progress(), "", [], None
+        self.evidence = []
         self.ui_actions = []  # now part of this run's audit log
 
     def apply(self, e: dict) -> None:
@@ -200,6 +239,8 @@ class GuiState:
             self.progress.total, self.progress.bytes_total = e["total_items"], e["total_bytes"]
         elif kind == "item_started":
             self.current_item = e["path"]
+        elif kind == "evidence_linked":
+            self.evidence.append(EvidenceLink(e["index"], e["path"], e.get("evidence_id"), e["status"]))
         elif kind == "progress":
             self.progress = Progress(e["done"], e["total"], e["bytes_done"], e["bytes_total"], e["elapsed_ms"], e["eta_ms"])
         elif kind == "error":

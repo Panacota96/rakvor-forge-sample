@@ -14,6 +14,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "src"))
+from rv_hashinv.core.envinfo import DISTRIBUTION, TRACKED  # noqa: E402
 DIST = ROOT / "dist"
 VERSION = "0.1.0"  # x-release-please-version
 
@@ -24,6 +26,9 @@ COMMON = [
     f"--windows-icon-from-ico={ROOT / 'src' / 'rv_hashinv' / 'resources' / 'brand' / 'rv.ico'}",
     "--company-name=Rakvor", "--product-name=RV HashInv",
     f"--file-version={VERSION}", f"--product-version={VERSION}",
+    # environment.json lists dependency versions from package metadata (core/envinfo.py): embed it.
+    f"--include-distribution-metadata={DISTRIBUTION}",
+    *(f"--include-distribution-metadata={name}" for name in TRACKED),
 ]
 
 

@@ -142,6 +142,14 @@ class MainWindow(QMainWindow):
         self.chk_recursive = QCheckBox(checked=True)
         self.chk_recursive.toggled.connect(lambda v: (self.state.set_recursive(v), self._refresh()))
         ev_l.addWidget(self.chk_recursive)
+        case_row = QHBoxLayout()
+        self.lbl_case_dir = QLabel()
+        self.case_dir_edit = QLineEdit()
+        self.case_dir_edit.editingFinished.connect(lambda: (self.state.set_case_dir(self.case_dir_edit.text()), self._refresh()))
+        self.btn_case_dir = QPushButton(clicked=self._browse_case)
+        for w in (self.lbl_case_dir, self.case_dir_edit, self.btn_case_dir):
+            case_row.addWidget(w)
+        ev_l.addLayout(case_row)
         v.addWidget(self.ev_box)
 
         self.hash_box = QGroupBox()
@@ -215,9 +223,12 @@ class MainWindow(QMainWindow):
         self.timing = QLabel()
         self.current = QLabel(objectName="muted")
         self.result = QLabel(wordWrap=True)
+        self.evidence_list = QListWidget()  # case folder: evidence id per item
+        self.evidence_list.setMaximumHeight(110)
         v.addWidget(self.timing)
         v.addWidget(self.current)
         v.addWidget(self.result)
+        v.addWidget(self.evidence_list)
         open_row = QHBoxLayout()
         self.btn_report = QPushButton(clicked=lambda: self._open(self.state.outcome.report))
         self.btn_logs = QPushButton(clicked=lambda: self._open(self.state.outcome.log_dir))
@@ -247,6 +258,9 @@ class MainWindow(QMainWindow):
         self.path_edit.setPlaceholderText(tr("path_hint"))
         self.btn_remove.setText(tr("remove"))
         self.chk_recursive.setText(tr("subfolders"))
+        self.lbl_case_dir.setText(tr("case_dir"))
+        self.case_dir_edit.setPlaceholderText(tr("case_dir_hint"))
+        self.btn_case_dir.setText(tr("browse"))
         self.hash_box.setTitle(tr("hashes"))
         self.rep_box.setTitle(tr("reports"))
         self.lbl_lang.setText(tr("report_lang"))
@@ -306,6 +320,13 @@ class MainWindow(QMainWindow):
         if d:
             self.out_edit.setText(d)
 
+    def _browse_case(self) -> None:
+        d = QFileDialog.getExistingDirectory(self, self.state.tr("case_dir"))
+        if d:
+            self.case_dir_edit.setText(d)
+            self.state.set_case_dir(d)
+            self._refresh()
+
     def _browse_cert(self) -> None:
         f, _ = QFileDialog.getOpenFileName(self, self.state.tr("sign_cert"), "", "PKCS#12 (*.p12 *.pfx)")
         if f:
@@ -330,6 +351,7 @@ class MainWindow(QMainWindow):
         self._refresh()
 
     def _start(self) -> None:
+        self.state.set_case_dir(self.case_dir_edit.text())
         self.state.set_sign_cert(self.cert_edit.text())
         self.state.set_timestamp(self.chk_ts.isChecked(), self.tsa_edit.text())
         try:
@@ -387,8 +409,9 @@ class MainWindow(QMainWindow):
             self.btn_remove,
             self.chk_recursive,
             self.lang,
-            self.out_edit,
             self.actor_edit,
+            self.case_dir_edit,
+            self.btn_case_dir,
             self.case_edit,
             self.jur,
             self.chk_ts,
@@ -398,6 +421,15 @@ class MainWindow(QMainWindow):
         ):
             w.setEnabled(idle)
         self.tsa_edit.setEnabled(idle and s.timestamp)
+        # Rule (state.py): a case folder decides where the run is written; the output field is locked.
+        self.out_edit.setEnabled(idle and not s.out_locked)
+        self.btn_browse.setEnabled(idle and not s.out_locked)
+        self.out_edit.setToolTip(tr("out_from_case") if s.out_locked else "")
+        shown = s.out_dir_display()
+        if self.out_edit.text() != shown:
+            self.out_edit.blockSignals(True)
+            self.out_edit.setText(shown)
+            self.out_edit.blockSignals(False)
         for a, cb in self.algo_boxes.items():
             cb.setChecked(a in s.selected)
             cb.setEnabled(idle and s.can_toggle(a))
@@ -422,6 +454,12 @@ class MainWindow(QMainWindow):
             )
         else:
             self.result.setText("")
+        lines = s.evidence_lines()
+        self.evidence_list.setVisible(bool(lines))
+        if [self.evidence_list.item(i).text() for i in range(self.evidence_list.count())] != [f"{tr('evidence_ids')}:", *lines]:
+            self.evidence_list.clear()
+            if lines:
+                self.evidence_list.addItems([f"{tr('evidence_ids')}:", *lines])
         self.btn_report.setVisible(s.outcome is not None)
         self.btn_logs.setVisible(s.outcome is not None)
         self.warn_list.setVisible(bool(s.warnings))

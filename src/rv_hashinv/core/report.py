@@ -44,6 +44,28 @@ BLANK_TRANSFER_ROWS = 6
 
 
 @dataclass
+class CaseTally:
+    """How the run's items relate to the case registry."""
+
+    registered: int = 0  # items that carry an evidence id from intake (new or already registered)
+    added: int = 0  # of those, newly added to the registry by this run
+    verified: int = 0
+    mismatched: int = 0
+    unregistered: int = 0
+
+
+@dataclass
+class CaseInfo:
+    case_id: str
+    role: str  # intake | analysis
+    dir: str
+    tally: CaseTally = field(default_factory=CaseTally)
+
+    def to_json(self) -> dict:
+        return {"case_id": self.case_id, "role": self.role, "case_dir": self.dir, "counts": dict(vars(self.tally))}
+
+
+@dataclass
 class RunInfo:
     tool_name: str
     tool_version: str
@@ -60,6 +82,7 @@ class RunInfo:
     jurisdiction: str = "co"
     signer: Any = None  # trust.PdfSigner or None
     timestamp: dict | None = None  # {"status": ok|pending|off, ...}
+    case: CaseInfo | None = None  # set when the run works in a shared case folder (--case-dir)
 
     def custody_langs(self) -> list[str]:
         return list(dict.fromkeys([JURISDICTIONS[self.jurisdiction], "en"]))
@@ -78,6 +101,9 @@ class ItemResult:
     error: str | None = None
     audit_first_seq: int = 0
     audit_last_seq: int = 0
+    evidence_id: str | None = None  # case folder only: E0001...
+    case_status: str | None = None  # registered | already_registered | verified | mismatch | not_in_registry
+    intake_utc: str | None = None
 
     @property
     def file_name(self) -> str:
@@ -176,7 +202,11 @@ def _base(lang: str, run: RunInfo) -> dict:
         "limitations": [i18n.limitation(lang, code) for code in LIMITATIONS],
         "brand": i18n.catalog(lang)["brand"],
         "logo_svg": _LOGO,
-        "signature": {"signed": run.signer is not None, "by": getattr(run.signer, "subject", "")},
+        "signature": {
+            "signed": run.signer is not None,
+            "by": getattr(run.signer, "subject", ""),
+            "certificate_sha256": getattr(run.signer, "fingerprint_sha256", ""),
+        },
         "timestamp": _timestamp_view(lang, run.timestamp),
     }
 
@@ -184,6 +214,12 @@ def _base(lang: str, run: RunInfo) -> dict:
 def _timestamp_view(lang: str, ts: dict | None) -> dict:
     ts = ts or {"status": "off"}
     return {**ts, "status_label": i18n.label(lang, f"timestamp_{ts['status']}")}
+
+
+def _case_view(run: RunInfo) -> dict | None:
+    if run.case is None:
+        return None
+    return {"case_id": run.case.case_id, "role": run.case.role, "dir": run.case.dir, **vars(run.case.tally)}
 
 
 def statistics_context(lang: str, run: RunInfo, items: list[ItemResult], totals: RunTotals, audit: AuditRef) -> dict:
@@ -212,12 +248,14 @@ def statistics_context(lang: str, run: RunInfo, items: list[ItemResult], totals:
                     "file_name": it.file_name,
                     "size": it.size,
                     "finding_count": len(it.findings),
+                    "evidence_id": it.evidence_id,
                     "status": it.status,
                     "status_label": i18n.label(lang, f"status_{it.status}"),
                     "link": f"items/{it.folder}/technical.{lang}.html",
                 }
                 for it in items
             ],
+            "case": _case_view(run),
             "audit": {"head": audit.head, "entries": audit.entries, "log_dir": audit.log_dir},
         }
     )
@@ -245,7 +283,12 @@ def item_context(lang: str, run: RunInfo, it: ItemResult, audit: AuditRef) -> di
                 "primary_hash": digest,
                 "audit_first_seq": it.audit_first_seq,
                 "audit_last_seq": it.audit_last_seq,
+                "evidence_id": it.evidence_id,
+                "intake_utc": it.intake_utc,
+                "case_status": it.case_status,
+                "case_status_label": i18n.label(lang, f"case_status_{it.case_status}") if it.case_status else None,
             },
+            "case": _case_view(run),
             "hash_rows": [{"algorithm": a, "value": h} for a, h in it.hashes],
             "findings": [_finding_view(lang, f) for f in it.findings],
             "audit": {"head": audit.head, "entries": audit.entries, "log_dir": audit.log_dir},
@@ -282,6 +325,7 @@ def _run_json(run: RunInfo) -> dict:
         "cancelled": run.cancelled,
         "jurisdiction": run.jurisdiction,
         "pdf_signed_by": getattr(run.signer, "subject", None),
+        "pdf_signer_certificate_sha256": getattr(run.signer, "fingerprint_sha256", None),
     }
 
 
@@ -298,9 +342,11 @@ def statistics_json(run: RunInfo, items: list[ItemResult], totals: RunTotals, au
         "items_by_status": dict(sorted(Counter(it.status for it in items).items())),
         "items_by_type": dict(sorted(Counter(it.detected_type or "unknown" for it in items).items())),
         "duplicate_groups": [{"hash": h, "items": [items[i].index for i in idx]} for h, idx in duplicate_groups(items)],
+        "case": run.case.to_json() if run.case else None,
         "items": [
             {
                 "index": it.index,
+                "evidence_id": it.evidence_id,
                 "path": str(it.path),
                 "size": it.size,
                 "status": it.status,
@@ -322,6 +368,7 @@ def technical_json(run: RunInfo, it: ItemResult) -> dict:
         "run": _run_json(run),
         "item": {
             "index": it.index,
+            "evidence_id": it.evidence_id,
             "path": str(it.path),
             "file_name": it.file_name,
             "size": it.size,
@@ -331,6 +378,11 @@ def technical_json(run: RunInfo, it: ItemResult) -> dict:
             "status": it.status,
             "error": it.error,
         },
+        "case": (
+            {"case_id": run.case.case_id, "role": run.case.role, "case_dir": run.case.dir, "status": it.case_status, "intake_utc": it.intake_utc}
+            if run.case
+            else None
+        ),
         "hashes": dict(it.hashes),
         "findings": _findings_json(it, run.langs),
         "limitations": LIMITATIONS,
@@ -343,7 +395,7 @@ def summary_json(run: RunInfo, it: ItemResult) -> dict:
         "schema": SCHEMA_SUMMARY,
         "run_id": run.run_id,
         "case_id": run.case_id,
-        "item": {"index": it.index, "file_name": it.file_name},
+        "item": {"index": it.index, "evidence_id": it.evidence_id, "file_name": it.file_name},
         "status": it.status,
         "fingerprint": {"algorithm": it.hashes[0][0], "value": it.hashes[0][1]} if it.hashes else None,
         "findings": _findings_json(it, run.langs),
@@ -501,7 +553,10 @@ def _header(ctx: dict, title_key: str, subtitle: str) -> list:
 
 def _signature_row(ctx: dict) -> tuple[str, str]:
     t, sig = ctx["t"], ctx["signature"]
-    return (t["signature"], f"{t['signed_by']} {sig['by']}" if sig["signed"] else t["not_signed"])
+    return (
+        t["signature"],
+        f"{t['signed_by']} {sig['by']} ({t['certificate_sha256']} {sig['certificate_sha256']})" if sig["signed"] else t["not_signed"],
+    )
 
 
 def statistics_pdf(ctx: dict) -> bytes:
@@ -535,12 +590,16 @@ def statistics_pdf(ctx: dict) -> bytes:
             s.append(_p(t["none"]))
         for d in ctx["duplicate_rows"]:
             s.append(KeepTogether([_p(d["hash"], "mono"), *_bullets(d["paths"]), Spacer(1, 4)]))
+        case = ctx["case"]
+        if case:
+            rows = [(t["case"], case["case_id"])] + [(t[k], case[k]) for k in ("registered", "added", "verified", "mismatched", "unregistered")]
+            s += [_p(t["case_verification"], "h"), _kv([*rows, (t["case_dir"], case["dir"])])]
         s.append(_p(t["items"], "h"))
         s.append(
             _kv(
                 [
                     (
-                        f"#{r['index']}  {r['file_name']}",
+                        f"#{r['index']}  {r['evidence_id']}  {r['file_name']}" if r["evidence_id"] else f"#{r['index']}  {r['file_name']}",
                         f"{r['status_label']} · {r['size']} {t['bytes'].lower()} · {r['finding_count']} {t['findings'].lower()}",
                     )
                     for r in ctx["item_rows"]
@@ -574,18 +633,23 @@ def technical_pdf(ctx: dict) -> bytes:
     def story() -> list:
         t, it = ctx["t"], ctx["item"]
         s = _header(ctx, "title_technical", f"{t['item']} #{it['index']} · {it['file_name']} · {t['run_id']}: {ctx['run']['run_id']}")
-        s.append(
-            _kv(
-                [
-                    (t["path"], it["path"]),
-                    (t["size"], it["size"]),
-                    (t["modified"], it["modified_utc"]),
-                    (t["extension"], it["extension_text"]),
-                    (t["detected_type"], it["detected_text"]),
-                    (t["status"], it["status_label"]),
-                ]
-            )
-        )
+        rows = [
+            (t["path"], it["path"]),
+            (t["size"], it["size"]),
+            (t["modified"], it["modified_utc"]),
+            (t["extension"], it["extension_text"]),
+            (t["detected_type"], it["detected_text"]),
+            (t["status"], it["status_label"]),
+        ]
+        if ctx["case"]:
+            rows += [
+                (t["case"], ctx["case"]["case_id"]),
+                (t["evidence_id"], it["evidence_id"] or t["none"]),
+                (t["case_registry"], it["case_status_label"]),
+            ]
+            if it["intake_utc"]:
+                rows.append((t["intake_date"], it["intake_utc"]))
+        s.append(_kv(rows))
         s += [_p(t["hashes"], "h"), _kv([(h["algorithm"], h["value"]) for h in ctx["hash_rows"]])]
         s.append(_p(t["findings"], "h"))
         if not ctx["findings"]:
@@ -620,7 +684,8 @@ def technical_pdf(ctx: dict) -> bytes:
 def summary_pdf(ctx: dict) -> bytes:
     def story() -> list:
         t, it, run = ctx["t"], ctx["item"], ctx["run"]
-        sub = it["file_name"] + (f" · {t['case']}: {run['case_id']}" if run["case_id"] else "")
+        sub = it["file_name"] + (f" · {t['evidence_id']}: {it['evidence_id']}" if it["evidence_id"] else "")
+        sub += f" · {t['case']}: {run['case_id']}" if run["case_id"] else ""
         s = _header(ctx, "title_summary", sub)
         s += [_p(it["status_label"], "status"), _p(it["summary_text"])]
         s += [_p(t["what_we_did"], "h"), _p(t["method_text"]), _p(t["what_we_found"], "h")]
@@ -645,7 +710,8 @@ def custody_context(lang: str, run: RunInfo, it: ItemResult, audit: AuditRef) ->
         "basis": c[f"basis_{j}"],
         "case_label": c[f"case_{j}"],
         "evidence_id_label": c[f"evidence_id_{j}"],
-        "evidence_id": f"{run.run_id}-{it.index:05d}",
+        "evidence_id": _custody_evidence_id(run, it),
+        "intake_utc": it.intake_utc,
         "jurisdiction_label": i18n.catalog(lang)["ui"][f"jur_{j}"],
         "operation_text": i18n.fill(
             c["operation_text"],
@@ -664,13 +730,19 @@ def custody_context(lang: str, run: RunInfo, it: ItemResult, audit: AuditRef) ->
     return ctx
 
 
+def _custody_evidence_id(run: RunInfo, it: ItemResult) -> str:
+    """The case registry id (E0001...) when the run is linked to a case, else "<RUN-ID>-<NNNNN>"."""
+    return it.evidence_id or f"{run.run_id}-{it.index:05d}"
+
+
 def custody_json(run: RunInfo, it: ItemResult) -> dict:
     return {
         "schema": SCHEMA_CUSTODY,
         "jurisdiction": run.jurisdiction,
         "run_id": run.run_id,
         "case_id": run.case_id,
-        "evidence_id": f"{run.run_id}-{it.index:05d}",
+        "evidence_id": _custody_evidence_id(run, it),
+        "intake_utc": it.intake_utc,
         "item": {"index": it.index, "path": str(it.path), "file_name": it.file_name, "size": it.size},
         "hashes": dict(it.hashes),
         "examiner": run.actor,
@@ -697,16 +769,11 @@ def custody_pdf(ctx: dict) -> bytes:
             _p(c["basis"], "note"),
             Spacer(1, 6),
         ]
-        s.append(
-            _kv(
-                [
-                    (c["case_label"], run["case_id"] or ""),
-                    (c["evidence_id_label"], c["evidence_id"]),
-                    (c["description"], f"{it['file_name']} · {it['size']} bytes · {it['detected_text']}"),
-                    (c["location"], it["path"]),
-                ]
-            )
-        )
+        rows = [(c["case_label"], run["case_id"] or ""), (c["evidence_id_label"], c["evidence_id"])]
+        if c["intake_utc"]:
+            rows.append((c["intake_date"], c["intake_utc"]))
+        rows += [(c["description"], f"{it['file_name']} · {it['size']} bytes · {it['detected_text']}"), (c["location"], it["path"])]
+        s.append(_kv(rows))
         s += [_p(c["integrity"], "h"), _kv([(h["algorithm"], h["value"]) for h in ctx["hash_rows"]])]
         s += [_p(c["operations"], "h"), _p(c["operation_text"]), _kv([(c["examiner"], run["actor"])])]
         head = [_p(x, "key") for x in (c["date_time"], c["delivered_by"], c["received_by"], c["purpose"], c["condition"])]

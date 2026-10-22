@@ -160,6 +160,14 @@
             "string",
             "null"
           ]
+        },
+        "evidence_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^E[0-9]{4,}$",
+          "description": "Case folder only: evidence id from the case registry (null when the run is not linked to a case or the item is not registered)."
         }
       }
     },
@@ -263,6 +271,50 @@
         },
         "last_seq": {
           "type": "integer"
+        }
+      }
+    },
+    "case": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Present when the run works in a shared case folder (--case-dir).",
+      "required": [
+        "case_id",
+        "role",
+        "case_dir",
+        "status",
+        "intake_utc"
+      ],
+      "properties": {
+        "case_id": {
+          "type": "string"
+        },
+        "role": {
+          "enum": [
+            "intake",
+            "analysis"
+          ]
+        },
+        "case_dir": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "registered",
+            "already_registered",
+            "verified",
+            "mismatch",
+            "not_in_registry",
+            null
+          ]
+        },
+        "intake_utc": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     }

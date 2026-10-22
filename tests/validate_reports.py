@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Validates every JSON report of a run against schemas/. Usage: python tests/validate_reports.py <OUT>/reports/<RUN-ID>"""
+"""Validates every JSON report of a run against schemas/.
+
+Usage: python tests/validate_reports.py <OUT>/reports/<RUN-ID>
+       python tests/validate_reports.py <CASE>     (a whole case folder: case.json, registry.json and every run's reports)
+"""
 
 import json
 import pathlib
@@ -13,6 +17,8 @@ SCHEMAS = {
     "technical.json": "item-technical.schema.json",
     "summary.json": "item-summary.schema.json",
     "custody.json": "item-custody.schema.json",
+    "case.json": "case.schema.json",
+    "registry.json": "registry.schema.json",
 }
 
 
@@ -20,6 +26,8 @@ def main() -> int:
     report_dir = pathlib.Path(sys.argv[1])
     count, failures = 0, 0
     for path in sorted(report_dir.rglob("*.json")):
+        if path.name not in SCHEMAS:
+            continue  # domain outputs (object dumps, extracted files) are not reports; their digests are audited
         schema = json.loads((ROOT / "schemas" / SCHEMAS[path.name]).read_text(encoding="utf-8"))
         try:
             jsonschema.validate(json.loads(path.read_text(encoding="utf-8")), schema)

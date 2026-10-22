@@ -1,6 +1,7 @@
 """Drives the real PySide6 window offscreen: add evidence, pick 2 hashes, run, check result."""
 
 import os
+import threading
 
 import pytest
 
@@ -9,6 +10,7 @@ pytest.importorskip("PySide6", reason="install the [gui] extra to run window tes
 from PySide6.QtCore import QCoreApplication, QEventLoop, QTimer  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
+from rv_hashinv.core import CASE_ROLE, RunConfig, run  # noqa: E402
 from rv_hashinv.gui.app import MainWindow  # noqa: E402
 
 
@@ -51,5 +53,26 @@ def test_window_runs_a_review(qapp, tmp_path, sample):
     assert '"ui_interface_language_changed"' in log and '"ui_timestamp_changed"' in log
     if os.environ.get("RV_SCREENSHOT"):
         w.grab().save(os.environ["RV_SCREENSHOT"])
+    w.close()
+    QCoreApplication.processEvents()
+
+
+def test_window_case_folder_locks_output_and_lists_evidence_ids(qapp, tmp_path, sample):
+    w = MainWindow([str(sample)])
+    w.show()
+    w.chk_ts.setChecked(False)  # offline
+    w.case_dir_edit.setText(str(tmp_path / "CASE-W"))
+    w.case_dir_edit.editingFinished.emit()
+    assert not w.out_edit.isEnabled() and w.out_edit.text().endswith("<RUN-ID>")
+    w.case_edit.setText("CASE-W")
+    if CASE_ROLE == "analysis":  # an analysis tool needs a registry: seed it with an explicit intake run
+        seed = RunConfig(inputs=[sample], out_dir=tmp_path, case_id="CASE-W", case_dir=tmp_path / "CASE-W", case_role="intake")
+        run(seed, lambda e: None, threading.Event())
+    w.btn_start.click()
+    assert wait_until(lambda: w.state.phase in ("finished", "failed"))
+    assert w.state.phase == "finished", w.state.error
+    assert w.evidence_list.isVisible() and w.evidence_list.count() == 4  # heading + 3 items
+    assert w.evidence_list.item(1).text().startswith("E0001")
+    assert (tmp_path / "CASE-W" / "evidence" / "registry.json").is_file()
     w.close()
     QCoreApplication.processEvents()

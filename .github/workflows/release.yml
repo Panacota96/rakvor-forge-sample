@@ -12,6 +12,11 @@ on:
 permissions:
   contents: read
 
+env:
+  # Pinned patch version of the Python that builds (and is frozen into) the release; environment.json records it
+  # as tool.python. Same value as RELEASE_PYTHON in ci.yml (freeze-smoke); tests/test_cli.py checks they agree.
+  RELEASE_PYTHON: "3.13.14"
+
 jobs:
   release-please:
     if: github.event_name == 'push'
@@ -46,7 +51,7 @@ jobs:
           ref: ${{ env.TAG || github.sha }}
       - uses: astral-sh/setup-uv@v6
         with:
-          python-version: "3.13"
+          python-version: ${{ env.RELEASE_PYTHON }}
       - run: uv sync --locked --extra gui --group build
       - name: Freeze with Nuitka (standalone folder)
         run: uv run python packaging/build_windows.py

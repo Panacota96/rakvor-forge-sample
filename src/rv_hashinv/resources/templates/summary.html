@@ -5,7 +5,7 @@
 <main>
 <header>
   <div><h1>{{ t.title_summary }}</h1><div>{{ item.file_name }}</div></div>
-  <div class="meta">{% if run.case_id %}<div>{{ t.case }}: {{ run.case_id }}</div>{% endif %}<div>{{ run.finished_utc }}</div></div>
+  <div class="meta">{% if run.case_id %}<div>{{ t.case }}: {{ run.case_id }}</div>{% endif %}{% if item.evidence_id %}<div>{{ t.evidence_id }}: {{ item.evidence_id }}</div>{% endif %}<div>{{ run.finished_utc }}</div></div>
 </header>
 
 <p class="status status-{{ item.status }}">{{ item.status_label }}</p>
@@ -23,5 +23,5 @@
 
 <h2>{{ t.next_steps }}</h2>
 <p>{{ item.next_text }}</p>
-<footer><div class="tagline">{{ brand.tagline }}</div>{{ t.generated_by }} {{ tool.name }} {{ tool.version }} · {{ run.run_id }} · {% if signature.signed %}{{ t.signed_by }} {{ signature.by }} (PDF){% else %}{{ t.not_signed }}{% endif %}</footer>
+<footer><div class="tagline">{{ brand.tagline }}</div>{{ t.generated_by }} {{ tool.name }} {{ tool.version }} · {{ run.run_id }} · {% if signature.signed %}{{ t.signed_by }} {{ signature.by }} (PDF; {{ t.certificate_sha256 }} <span class="mono">{{ signature.certificate_sha256 }}</span>){% else %}{{ t.not_signed }}{% endif %}</footer>
 </main></body></html>

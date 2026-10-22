@@ -73,9 +73,25 @@
     "covers": "Cubre las entradas de auditoría hasta",
     "signature": "Firma digital",
     "signed_by": "Firmado por",
+    "certificate_sha256": "certificado SHA-256",
     "not_signed": "Este PDF no tiene firma digital.",
     "custody": "Formato de cadena de custodia",
-    "jurisdiction": "Jurisdicción"
+    "jurisdiction": "Jurisdicción",
+    "evidence_id": "ID de evidencia",
+    "case_registry": "Registro del caso",
+    "case_status_registered": "Registrado en la recepción por esta ejecución",
+    "case_status_already_registered": "Ya registrado (misma ruta, mismo contenido)",
+    "case_status_verified": "Verificado: idéntico a la evidencia registrada",
+    "case_status_mismatch": "NO COINCIDE con la evidencia registrada",
+    "case_status_not_in_registry": "No está en el registro del caso",
+    "case_verification": "Carpeta del caso",
+    "registered": "Con ID de evidencia de la recepción",
+    "added": "Registrados por primera vez en esta ejecución",
+    "verified": "Verificados contra el registro",
+    "mismatched": "Distintos del registro",
+    "unregistered": "No registrados",
+    "intake_date": "Registrado en la recepción (UTC)",
+    "case_dir": "Carpeta del caso"
   },
   "severity": {
     "high": "Alta",
@@ -108,6 +124,21 @@
       "title": "No se pudo leer el archivo",
       "shows": "La lectura falló: %{error}.",
       "does_not_prove": "No demuestra que el archivo esté dañado; permisos o bloqueos pueden causarlo."
+    },
+    "EVIDENCE_HASH_MISMATCH_WITH_CASE": {
+      "title": "Difiere de la evidencia registrada en el caso",
+      "shows": "El %{algorithm} de este archivo es %{actual}, pero la evidencia %{evidence_id} se registró en la recepción con %{expected}: el archivo examinado no es idéntico bit a bit al elemento registrado.",
+      "does_not_prove": "Quién cambió el archivo, cuándo, ni si el cambio fue intencional; el análisis se ejecutó igualmente para que el perito decida."
+    },
+    "EVIDENCE_NOT_IN_CASE_REGISTRY": {
+      "title": "No registrado en el caso",
+      "shows": "Ningún elemento del caso %{case_id} se registró con esta ruta o este contenido, por lo que no puede mostrarse su continuidad desde la recepción.",
+      "does_not_prove": "Que el archivo esté alterado o sea irrelevante; puede simplemente no haber pasado por la recepción."
+    },
+    "REGISTRY_PATH_CONTENT_CHANGED": {
+      "title": "La ruta registrada contiene ahora otro contenido",
+      "shows": "Esta ruta se registró antes como %{previous_id} con otro contenido; el contenido actual recibe un nuevo ID de evidencia.",
+      "does_not_prove": "Cuál versión es la original ni por qué cambió el contenido."
     }
   },
   "limitations": {
@@ -142,7 +173,8 @@
     "condition": "Estado del embalaje / soporte",
     "examiner": "Perito",
     "signature_line": "Firma",
-    "observations": "Observaciones"
+    "observations": "Observaciones",
+    "intake_date": "Registrado en la recepción (UTC)"
   },
   "ui": {
     "window_title": "Rakvor",
@@ -189,6 +221,10 @@
     "open_report": "Abrir informe",
     "open_logs": "Abrir carpeta de logs",
     "warnings": "Advertencias",
-    "lang_all": "Los tres (EN + ES + FR)"
+    "lang_all": "Los tres (EN + ES + FR)",
+    "case_dir": "Carpeta del caso",
+    "case_dir_hint": "opcional: carpeta compartida del caso (enlaza las herramientas de un caso)",
+    "out_from_case": "Carpeta de salida: definida por la carpeta del caso",
+    "evidence_ids": "ID de evidencia"
   }
 }

@@ -34,13 +34,41 @@ Editing a value changes that entry's hash; deleting or re-ordering breaks `seq` 
 Verify with either implementation:
 
 ```bash
-rv-hashinv verify-log rakvor-out/logs/<RUN-ID>          # exit 0 intact, 3 broken
-python tests/verify_chain.py rakvor-out/logs/<RUN-ID>   # independent re-implementation
+rv-hashinv verify-log rakvor-out/logs/<RUN-ID>          # exit 0 intact, 3 broken or truncated
+python tests/verify_chain.py rakvor-out/logs/<RUN-ID>   # independent re-implementation (chain + hashes.csv)
 ```
 
 > The chain proves the log is **internally consistent**. On its own it does not prove *when* it was written —
-> that is what the trusted timestamp below adds. Storing the final `entry_hash` (printed in the statistics report)
-> in your case management system remains good practice.
+> that is what the trusted timestamp below adds — nor that it is *complete*: removing the last entries leaves a
+> shorter chain that is still valid. Storing the final `entry_hash` (printed in the statistics report) in your
+> case management system remains good practice.
+
+### Truncation: what anchors the end of the log
+
+A chain cannot vouch for its own length, so `verify-log` compares the end of the log with the records kept
+**outside** it:
+
+```mermaid
+flowchart LR
+    L["audit.jsonl<br/>entries #1 … #N"] --> V{"verify-log"}
+    T["timestamp-K.json + .tsr<br/>covers_seq K, head = hash of #K"] --> V
+    C["case-log.jsonl run_finished<br/>audit_entries M, audit_head"] --> V
+    V -->|"#K or #M missing, or another hash"| B["BROKEN: truncated (exit 3)"]
+    V -->|"the records agree"| O["OK + which entries are anchored"]
+    V -->|"no timestamp, not in a case"| N["OK + 'truncation not detectable<br/>without a timestamp or case record'"]
+```
+
+| Record | Where | What `verify-log` checks |
+| --- | --- | --- |
+| RFC 3161 timestamp | `timestamp-<K>.json` / `.tsr` next to the log | entry `#K` still exists and its `entry_hash` is the head the token signs; every `timestamp_obtained` entry still has its token file |
+| Case log | `<CASE>/case-log.jsonl`, for a run in `<CASE>/runs/<tool>/<RUN-ID>/logs` | `run_finished` of this run records `audit_entries` and `audit_head`: entry `#M` exists with that hash, and only `timestamp_obtained` follows it |
+
+The output names the last anchored entry. A standalone run timestamps the head **before** writing
+`timestamp_obtained`, `statistics_report_written` and `run_finished`, so those 3 entries are reported as
+"cannot be proven complete"; a run in a case folder is anchored to its last entry by the case log. Without either
+record `verify-log` prints `truncation not detectable without a timestamp or case record` (exit 0: nothing
+contradicts the log, but nothing vouches for its length). Deleting the timestamp files **and** the entries that
+refer to them is detectable only through the case log or a head kept elsewhere.
 
 ## Trusted timestamp (RFC 3161)
 
@@ -53,7 +81,7 @@ sequenceDiagram
     participant L as audit.jsonl
     participant A as TSA (RFC 3161)
     T->>L: … item_reports_written (entry #N)
-    T->>A: SHA-256 of entry #N hash + nonce
+    T->>A: entry_hash of #N (the head, a SHA-256) + nonce
     alt reachable
         A-->>T: signed token (genTime)
         T->>L: timestamp_obtained (covers_seq N, gen_time, tsa, token_sha256)
@@ -67,7 +95,10 @@ sequenceDiagram
 - The token is stored next to the log: `timestamp-<N>.tsr` (DER) and `timestamp-<N>.json` (readable summary).
 - Offline or air-gapped: the run still completes. When the network is back, `rv-hashinv timestamp <log folder>`
   re-verifies the chain and appends `timestamp_obtained` — earlier entries are never rewritten.
-- `verify-log` checks each token: imprint = stored head, and entry `#N` still has that hash.
+- The TSA receives the chain head itself: the `entry_hash` of entry `#N` (already a SHA-256 digest) is the
+  message imprint of the request (hash algorithm SHA-256); it is not hashed a second time.
+- `verify-log` checks each token: imprint = stored head, and entry `#N` still exists with that hash (a missing
+  entry `#N` is reported as truncation).
 - Independent check: `openssl ts -verify -digest <head> -in timestamp-<N>.tsr -CAfile <TSA chain>`.
 - `--no-timestamp` (or `RV_NO_TIMESTAMP=1`) disables it; tests use a local TSA (`tests/fake_tsa.py`).
 - **Limitation:** a timestamp proves the log existed at that time, not that its content is true.
@@ -128,10 +159,10 @@ flowchart LR
 
 | 27037 principle / activity | How RV HashInv supports it |
 | --- | --- |
-| Auditability (5.3.3) | Every action logged with actor, UTC time and chain hash |
+| Auditability (5.3.2) | Every action logged with actor, UTC time and chain hash; `verify-log` checks the chain and its end against the timestamp and the case log |
 | Repeatability (5.3.3) | `environment.json` records exact tool and dependency versions; same input → same hashes |
-| Reproducibility | Independent verifier (`tests/verify_chain.py`) and standard algorithms |
-| Justifiability | Every finding states what it shows and what it does **not** prove; limitations in every report |
+| Reproducibility (5.3.4) | Independent verifier (`tests/verify_chain.py`), standard algorithms, and a second implementation of the tool (the other profile) that numbers, hashes and verifies identically |
+| Justifiability (5.3.5) | Every finding states what it shows and what it does **not** prove; limitations in every report |
 | Preservation (7.1.4) | Read-only access; hashes of every file and of every report produced |
 | Documentation / chain of custody | Hash register, reports, and log folder form the record of the examination |
 

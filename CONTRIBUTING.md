@@ -46,7 +46,7 @@ python tests/verify_chain.py <some run>/logs/<RUN-ID>  # standalone check (stdli
 | Findings | Every finding has `shows` **and** `does_not_prove` wording in **all three** languages (`i18n/*.json`; a test checks the keys match). |
 | Reports | Adding a field to a JSON report: update `schemas/` and `docs/reports.md`. Removing one is a breaking change. |
 | Docs | Each page under `docs/` keeps at least one Mermaid diagram that renders on GitHub. |
-| Dependencies | New packages need a reason in the PR, an Apache-2.0-compatible licence, and `uv lock`. PySide6 is LGPL: ship it as separate DLLs (Nuitka standalone does), never statically. |
+| Dependencies | New packages need a reason in the PR, a permissive licence (MIT, Apache-2.0, BSD, ISC, Zlib) — no GPL/AGPL, because the tool is proprietary, and `uv lock`. PySide6 is LGPL: ship it as separate DLLs (Nuitka standalone does), never statically. |
 
 ## Adding a new finding
 

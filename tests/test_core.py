@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import os
 import threading
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import pytest
 from rv_hashinv.core import RunConfig, run
 from rv_hashinv.core.analyzer import analyze
 from rv_hashinv.core.audit import AuditLog, verify
+from rv_hashinv.core.envinfo import describe
 from rv_hashinv.core.hashing import CHUNK, hash_stream, self_test, validate_selection
 from rv_hashinv.core.i18n import catalog, parse_langs
 from rv_hashinv.core.inputs import collect
@@ -142,3 +144,36 @@ def test_cancel_before_start(tmp_path):
 def test_three_algorithms_refused(tmp_path):
     with pytest.raises(ValueError):
         run(_cfg(tmp_path, tmp_path, algorithms=["md5", "sha1", "sha256"]), lambda e: None, threading.Event())
+
+
+def test_item_order_is_bytewise_path_order(tmp_path):
+    """Bytewise order of the whole normalised path, not component order: "a-b/x" sorts before "a/x" ('-' 0x2D <
+    '/' 0x2F) and "B" before "a". The Rust profile numbers the same folder identically
+    (src/core/src/input.rs: items_are_sorted_by_normalised_path_bytes)."""
+    for f in ("a/x.txt", "a-b/x.txt", "B.txt", "a.txt", "é.txt", "z/w.txt"):
+        p = tmp_path / f
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(f, encoding="utf-8")
+    (tmp_path / "z" / "y").mkdir()
+    dot = tmp_path / "a" / ".." / "a.txt"  # same file as a.txt: not a duplicate item
+    items = collect([tmp_path, dot], recursive=True)
+    keys = [str(i.path) for i in items]
+    assert keys == sorted(keys, key=lambda k: k.encode("utf-8")) and len(set(keys)) == len(keys)
+    assert [i.index for i in items] == list(range(1, len(items) + 1))
+    if os.name != "nt":
+        assert [i.path.relative_to(tmp_path).as_posix() for i in items] == ["B.txt", "a-b/x.txt", "a.txt", "a/x.txt", "z/w.txt", "é.txt"]
+
+
+def test_input_list_with_utf8_bom(tmp_path):
+    (tmp_path / "a.txt").write_text("a")
+    (tmp_path / "list.txt").write_bytes("\ufeffa.txt\r\n# comment\r\n".encode())
+    items = collect([], tmp_path / "list.txt")
+    assert [i.path.name for i in items] == ["a.txt"]
+
+
+def test_environment_records_every_runtime_dependency_and_openssl():
+    env = describe("rv-hashinv", "0", "test", [])
+    names = {d.split("@")[0].lower() for d in env["dependencies"]}
+    assert {"pyhanko", "asn1crypto", "cryptography", "click", "jinja2", "reportlab", "blake3"} <= names
+    assert not {"pytest", "ruff"} & names, "dev tools are not runtime dependencies"
+    assert env["tool"]["openssl"]["python_ssl"].startswith(("OpenSSL", "LibreSSL"))

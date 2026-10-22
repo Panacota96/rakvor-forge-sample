@@ -44,6 +44,17 @@ def _summarize(details: Any) -> str:
     return " ".join(parts)
 
 
+def build_entry(seq: int, run_id: str, actor: str, action: str, item: str | None, details: Any, prev: str) -> dict[str, Any]:
+    """One chained entry (shared by audit.jsonl and the case log case-log.jsonl), with its entry_hash set."""
+    entry: dict[str, Any] = {"seq": seq, "ts_utc": utc_now(), "run_id": run_id, "actor": actor, "action": action}
+    if item is not None:
+        entry["item"] = item
+    entry["details"] = details if details is not None else {}
+    entry["prev_entry_hash"] = prev
+    entry["entry_hash"] = entry_hash(entry)
+    return entry
+
+
 class AuditLog:
     def __init__(self, directory: Path, run_id: str, actor: str):
         directory.mkdir(parents=True, exist_ok=True)
@@ -72,13 +83,8 @@ class AuditLog:
 
     def record(self, action: str, item: str | None = None, details: Any = None) -> int:
         self.seq += 1
-        ts = utc_now()
-        entry: dict[str, Any] = {"seq": self.seq, "ts_utc": ts, "run_id": self.run_id, "actor": self.actor, "action": action}
-        if item is not None:
-            entry["item"] = item
-        entry["details"] = details if details is not None else {}
-        entry["prev_entry_hash"] = self.head
-        entry["entry_hash"] = entry_hash(entry)
+        entry = build_entry(self.seq, self.run_id, self.actor, action, item, details, self.head)
+        ts = entry["ts_utc"]
         self._jsonl.write(json.dumps(entry, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n")
         self._text.write(f"{ts}  #{self.seq:05d}  {action:<20} {item + '  ' if item else ''}{_summarize(entry['details'])}\n")
         self._jsonl.flush()

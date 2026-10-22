@@ -31,6 +31,15 @@ flowchart TD
 | **Progress** | Bar by bytes processed, `files done / total`, elapsed time (always moving) and estimated time remaining. The file being read is shown below. |
 | **Result** | Counts by severity, **Open report** (statistics page in your language) and **Open log folder**. |
 
+## Case folder
+
+Fill **Case folder** in section 1 to work inside a shared case folder (see [case-folder.md](case-folder.md)).
+For a new folder, also fill **Case ID** (and the custody form's jurisdiction): they are written once to
+`case.json`. While a case folder is set, the **Output folder** shows `<case>/runs/rv-hashinv/<RUN-ID>` and cannot
+be edited, and you may start without adding evidence (every registered item is examined). After the run, the
+result panel lists the **evidence id** of every item (E0001…) and its status (registered, verified, mismatch, not in
+registry). The change is audited as `ui_case_dir_changed`.
+
 ## What the GUI records
 
 Your choices are part of the evidence record. Before the run starts, the GUI writes them to the audit log:

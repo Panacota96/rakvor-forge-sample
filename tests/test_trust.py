@@ -1,5 +1,6 @@
 """RFC 3161 timestamps, PDF signatures and custody forms, against a local test TSA (tests/fake_tsa.py)."""
 
+import http.server
 import io
 import json
 import sys
@@ -12,7 +13,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 import fake_tsa  # noqa: E402
 from rv_hashinv.core import RunConfig, run  # noqa: E402
 from rv_hashinv.core.audit import AuditLog, heads, verify  # noqa: E402
-from rv_hashinv.core.trust import TimestampError, request_timestamp, timestamp_head, verify_timestamps  # noqa: E402
+from rv_hashinv.core.trust import MAX_RESPONSE, TimestampError, request_timestamp, timestamp_head, verify_timestamps  # noqa: E402
+from rv_hashinv.core.verify import verify_log  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -38,9 +40,20 @@ def test_timestamp_covers_chain_head_and_tamper_is_caught(tmp_path, sample, pki)
     assert verify_timestamps(s.log_dir, heads(log)) == []
     meta = json.loads(next(s.log_dir.glob("timestamp-*.json")).read_text())
     assert heads(log)[meta["covers_seq"]] == meta["head"]
+    v = verify_log(log)
+    assert v.problems == [] and v.truncation == (
+        f"truncation: entries up to #{meta['covers_seq']} are anchored by the RFC 3161 timestamp (timestamp-{meta['covers_seq']:05d}.json); "
+        "3 entries after it (timestamp_obtained, statistics_report_written, run_finished) cannot be proven complete"
+    )
+    # Removing entries back to (and including) the timestamped one is detected through covers_seq.
+    full = log.read_text("utf-8")
+    log.write_text("".join(full.splitlines(keepends=True)[:-4]), encoding="utf-8")
+    assert any(p.startswith(f"truncated: {meta['file']} covers entry #{meta['covers_seq']}") for p in verify_log(log).problems)
+    log.write_text(full, encoding="utf-8")
     tsr = s.log_dir / meta["file"]
     tsr.write_bytes(tsr.read_bytes()[:-1] + b"\x00")
     assert verify_timestamps(s.log_dir, heads(log))
+    assert verify_log(log).problems
 
 
 def test_offline_tsa_is_pending_then_added_later(tmp_path, sample, pki):
@@ -61,6 +74,28 @@ def test_request_rejects_unreachable_tsa():
         request_timestamp(b"\0" * 32, "http://127.0.0.1:9/tsr", timeout=2)
 
 
+def test_tsa_response_larger_than_1_mib_is_refused():
+    class Huge(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/timestamp-reply")
+            self.end_headers()
+            self.wfile.write(b"\x30" * (MAX_RESPONSE + 4096))
+
+        def log_message(self, *args):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), Huge)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        with pytest.raises(TimestampError, match="larger than 1048576 bytes"):
+            request_timestamp(b"\0" * 32, f"http://127.0.0.1:{srv.server_address[1]}/tsr", timeout=5)
+    finally:
+        srv.shutdown()
+    assert MAX_RESPONSE == 1 << 20
+
+
 def test_every_pdf_is_signed_with_the_examiner_certificate(tmp_path, sample, pki):
     d, _ = pki
     from pyhanko.pdf_utils.reader import PdfFileReader
@@ -77,6 +112,12 @@ def test_every_pdf_is_signed_with_the_examiner_certificate(tmp_path, sample, pki
         assert "Ana Ruiz" in st.signing_cert.subject.human_friendly
     log = (s.log_dir / "audit.jsonl").read_text()
     assert '"signing_certificate_loaded"' in log and "password" not in log
+    # The reports print the signer's certificate fingerprint, as logged at signing_certificate_loaded.
+    fp = next(json.loads(x) for x in log.splitlines() if '"signing_certificate_loaded"' in x)["details"]["certificate_sha256"]
+    assert len(fp) == 64
+    item = next((s.report_dir / "items").iterdir())
+    assert fp in (item / "technical.en.html").read_text("utf-8")
+    assert json.loads((s.report_dir / "statistics.json").read_text("utf-8"))["run"]["pdf_signer_certificate_sha256"] == fp
 
 
 def test_wrong_certificate_password_fails_and_is_audited(tmp_path, sample, pki):

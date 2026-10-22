@@ -8,9 +8,12 @@ flowchart LR
   A --> C[verify-log]
   A --> D[self-test]
   A --> T[timestamp]
+  A --> V[verify-case]
   T --> E
   B --> E[(logs/RUN-ID)]
   B --> F[(reports/RUN-ID)]
+  B -. --case-dir .-> K[(CASE folder)]
+  V --> K
   C --> E
 ```
 
@@ -29,15 +32,22 @@ Usage: rv-hashinv [OPTIONS] COMMAND [ARGS]...
     Each run also writes a statistics report and an audit trail under <OUT>/logs/<RUN-ID>/.
     Every action is appended to a hash-chained log that `rv-hashinv verify-log` can check later.
 
+    CASE FOLDER (--case-dir): Rakvor tools share one folder per case. rv-hashinv is the intake tool:
+    it   registers every hashed file in evidence/registry.json (evidence ids E0001, E0002, ...) so
+    later tools   can prove they examined bit-identical copies. `rv-hashinv verify-case <CASE>`
+    checks it all.
+
 Options:
   -V, --version  Show the version and exit.
   -h, --help     Show this message and exit.
 
 Commands:
-  scan        Hash, check and report on a file, a folder or a list of files.
-  self-test   Check every hash algorithm against known-answer test vectors.
-  timestamp   Add an RFC 3161 timestamp to a finished run (e.g. after working offline).
-  verify-log  Verify that an audit log has not been edited, truncated or re-ordered.
+  scan         Hash, check and report on a file, a folder or a list of files.
+  self-test    Check every hash algorithm against known-answer test vectors.
+  timestamp    Add an RFC 3161 timestamp to a finished run (e.g. after working offline).
+  verify-case  Verify a whole case folder: case log, evidence registry and every run's audit log.
+  verify-log   Verify an audit log (audit.jsonl): edited, deleted or re-ordered entries, and
+               truncation.
 
   Run `rv-hashinv <COMMAND> --help` for the options, examples and exit codes of each command.
 ```
@@ -57,11 +67,16 @@ Usage: rv-hashinv scan [OPTIONS]
     Each run also writes a statistics report and an audit trail under <OUT>/logs/<RUN-ID>/.
     Every action is appended to a hash-chained log that `rv-hashinv verify-log` can check later.
 
+    CASE FOLDER (--case-dir): Rakvor tools share one folder per case. rv-hashinv is the intake tool:
+    it   registers every hashed file in evidence/registry.json (evidence ids E0001, E0002, ...) so
+    later tools   can prove they examined bit-identical copies. `rv-hashinv verify-case <CASE>`
+    checks it all.
+
 Options:
   -i, --input PATH       File or folder to review. Repeat for several. Folders are reviewed one
                          level deep unless --recursive is given. Symbolic links are not followed.
-                         Default: none (required unless --input-list is given). Example: --input
-                         D:\evidence --input E:\phone-export\chat.txt
+                         Default: none (required unless --input-list, --case-dir or --evidence is
+                         given). Example: --input D:\evidence --input E:\phone-export\chat.txt
   -L, --input-list FILE  Text file with one path per line (bulk review). Lines starting with # are
                          ignored. Relative paths are resolved from the list file's folder. Default:
                          none. Example: --input-list case-014-files.txt
@@ -71,20 +86,23 @@ Options:
                          blake3. Both are computed in the same read of each file. More than two is
                          refused (exit code 2). Default: sha256. Example: --hash sha256,md5  or
                          --hash sha256 --hash blake3
-  -o, --out DIR          Folder where logs/ and reports/ are created. Created if missing. Default:
-                         ./rakvor-out. Example: --out E:\case-014\rv-hashinv
+  -o, --out DIR          Folder where logs/ and reports/ are created (if missing). Not used with
+                         --case-dir. Default: ./rakvor-out. Example: --out E:\case-014\rv-hashinv
   -l, --lang LANG        Report language: en, es, fr, or all (one HTML and PDF per language). JSON
                          is language-neutral. Default: en. Example: --lang es  or  --lang all
   -a, --actor NAME       Name of the examiner, written in every audit entry and report. Default: the
                          operating-system user name. Example: --actor "Ana Ruiz"
-  -c, --case ID          Case or engagement identifier printed on the reports. Default: none.
-                         Example: --case CASE-2026-014
+  -c, --case ID          Case or engagement identifier printed on the reports. With --case-dir it
+                         names the case when the folder is created, and must match case.json
+                         afterwards (it can be left out). Default: none. Example: --case
+                         CASE-2026-014
   -p, --progress MODE    How progress is shown: bar (elapsed, throughput, ETA on stderr), jsonl (one
                          JSON event per line on stdout) or none. Default: bar (hidden automatically
                          when stderr is not a terminal). Example: --progress jsonl
   -j, --jurisdiction CC  Chain-of-custody form per item: co (Colombia, Fiscalía style, Spanish) or
-                         fr (France, scellés, French); an English copy is always added. Default: co.
-                         Example: --jurisdiction fr
+                         fr (France, scellés, French); an English copy is always added. In a case
+                         folder (--case-dir) the case's jurisdiction applies. Default: co. Example:
+                         --jurisdiction fr
   --tsa-url URL          RFC 3161 time-stamping authority for the audit chain head. Default:
                          http://timestamp.digicert.com. Example: --tsa-url https://freetsa.org/tsr
   --no-timestamp         Do not request a trusted timestamp (offline labs). Default: off (a
@@ -95,6 +113,15 @@ Options:
                          --sign-cert C:\certs\ana-ruiz.p12
   --sign-pass-env VAR    Environment variable holding the certificate password. Default:
                          RV_SIGN_PASSWORD. Example: --sign-pass-env CERT_PASS
+  --case-dir DIR         Shared case folder that links the Rakvor tools of one case (created with
+                         --case if missing). Outputs go to <DIR>/runs/rv-hashinv/<RUN-ID>/; every
+                         hashed file is registered in <DIR>/evidence/registry.json; the run is
+                         recorded in <DIR>/case-log.jsonl. With no --input, every registered item is
+                         examined. Default: none (standalone run in --out). Example: --case-dir
+                         E:\CASE-014 --case CASE-014
+  -E, --evidence IDS     Registered evidence ids to examine (needs --case-dir), comma-separated or
+                         repeated. Default: none (the --input files, or every registered item).
+                         Example: --evidence E0001,E0007
   --help                 Show this message and exit.
 
   EXAMPLES:
@@ -106,13 +133,22 @@ Options:
       rv-hashinv scan --input-list files.txt --lang all --progress jsonl > events.jsonl
     Verify the audit log afterwards:
       rv-hashinv verify-log rakvor-out/logs/<RUN-ID>/audit.jsonl
+    Open a case folder and register the evidence (intake), then verify the whole case:
+      rv-hashinv scan -i D:\evidence -r --case-dir E:\CASE-014 --case CASE-014 --jurisdiction fr
+      rv-hashinv verify-case E:\CASE-014
+    Re-examine two registered items of the case:
+      rv-hashinv scan --case-dir E:\CASE-014 --evidence E0001,E0002
 
   EXIT CODES:
     0    Completed; no high-severity finding.
-    1    Runtime error (input not found, output not writable, ...). See the audit log.
+    1    Runtime error (input not found, output not writable, case log locked, ...).
+         See the audit log.
     2    Usage error (unknown option, more than two hash algorithms, unsupported language).
+         With --case-dir: folder of another case or schema, --case missing when creating the
+         case, unknown evidence id.
     3    Completed with at least one high-severity finding (e.g. unreadable file, program under
-         another name).
+         another name, evidence that differs from the case registry), or the case folder fails
+         verification (nothing is written to it).
     130  Cancelled with Ctrl+C. Partial reports and the cancellation are written to the audit log.
 
   FILES WRITTEN:
@@ -125,17 +161,29 @@ Options:
     <OUT>/reports/<RUN-ID>/items/<NNNNN>-<NAME>/summary.json|.<LANG>.html|.<LANG>.pdf
     <OUT>/reports/<RUN-ID>/items/<NNNNN>-<NAME>/custody.json|.<es|fr>.html|.pdf|.en.html|.pdf
     <OUT>/logs/<RUN-ID>/timestamp-<SEQ>.tsr|.json  RFC 3161 token for the audit chain head.
+    With --case-dir <CASE>, logs/ and reports/ go to <CASE>/runs/rv-hashinv/<RUN-ID>/, plus:
+    <CASE>/case.json                        Case id, jurisdiction, creation (written once).
+    <CASE>/case-log.jsonl                   Hash-chained case log of every tool: case_created,
+                                            run_started, evidence_registered, run_finished.
+    <CASE>/evidence/registry.json|.csv      Evidence registry: E0001..., path, size, hashes.
 
   FORENSIC NOTES:
     - Evidence is opened read-only and never modified; modification times are compared before and after.
     - Work on a verified copy (write-blocked image or export), not on original media.
     - Each audit entry stores the SHA-256 of the previous one; editing, deleting or re-ordering any
-      line is detected by `verify-log`. Keep the log folder with the reports.
+      line is detected by `verify-log`. Removing the last lines is detected only against a record
+      kept outside the log: the RFC 3161 timestamp or, with --case-dir, the case log. Keep the log
+      folder with the reports.
     - A file without findings is not proven authentic; read the Limitations section of each report.
     - MD5 and SHA-1 are accepted for compatibility with older case files; pair them with SHA-256 or BLAKE3.
     - The chain head is timestamped by an RFC 3161 authority (proves when the log existed). Offline? The run
       finishes with `timestamp_pending`; run `rv-hashinv timestamp <LOG>` later.
     - With --sign-cert every PDF is signed with the examiner's certificate; the password is never logged.
+    - Case folder: every tool re-verifies case-log.jsonl and the registry digest before
+      writing, and refuses a broken case (exit 3). Appends happen under case-log.lock; a lock
+      older than 10 minutes is reported as stale and never deleted automatically.
+    - Each run's audit.jsonl records case_linked (the case-log entry it started from); the case
+      log records the run's final audit head, so the two chains vouch for each other.
 ```
 
 ## rv-hashinv verify-log
@@ -143,7 +191,7 @@ Options:
 ```text
 Usage: rv-hashinv verify-log [OPTIONS] LOG
 
-  Verify that an audit log (audit.jsonl) has not been edited, truncated or re-ordered.
+  Verify an audit log (audit.jsonl): edited, deleted or re-ordered entries, and truncation.
 
   LOG is the path to audit.jsonl, or to the run's log folder that contains it. Example: rakvor-
   out/logs/20261019T101500Z-a1b2c3
@@ -151,14 +199,28 @@ Usage: rv-hashinv verify-log [OPTIONS] LOG
 Options:
   --help  Show this message and exit.
 
+  CHECKS:
+    - every entry links to the previous one (hash chain): an edited, deleted or re-ordered entry
+      breaks it;
+    - every timestamp token (timestamp-<SEQ>.tsr) covers the hash of the entry it names, and every
+      timestamp_obtained entry still has its token file;
+    - truncation: a chain alone cannot show that entries were removed from its end. The log must
+      still contain the entry covered by its RFC 3161 timestamp (covers_seq) and, for a run inside
+      a case folder (<CASE>/runs/<TOOL>/<RUN-ID>/logs), end with the audit head that the case log
+      recorded at run_finished (only timestamp_obtained may follow). Entries after the last
+      anchored one are listed as not provable; with neither record the output says
+      "truncation not detectable without a timestamp or case record".
+
   EXAMPLES:
     rv-hashinv verify-log rakvor-out/logs/20261019T101500Z-a1b2c3/audit.jsonl
     rv-hashinv verify-log rakvor-out/logs/20261019T101500Z-a1b2c3
+    rv-hashinv verify-log E:\CASE-014\runs\rv-hashinv\20261019T101500Z-a1b2c3\logs
 
   EXIT CODES:
-    0  The chain is intact.
+    0  The chain is intact and agrees with its timestamps and case record (if any).
     1  The log cannot be read.
-    3  The chain is broken: at least one entry was edited, deleted or re-ordered.
+    3  The chain is broken (an entry was edited, deleted or re-ordered), a timestamp does not
+       match, or the log is shorter than its timestamp or case record says (truncated).
 ```
 
 ## rv-hashinv timestamp
@@ -184,7 +246,7 @@ Options:
   EXIT CODES:
     0  Timestamp obtained and logged.
     1  The TSA could not be reached (nothing changed; try again).
-    3  The log is broken: no timestamp is added to a broken chain.
+    3  The log is missing or broken: no timestamp is added.
 ```
 
 ## rv-hashinv self-test
@@ -203,5 +265,40 @@ Options:
   EXIT CODES:
     0  All algorithms give the published answer for the input "abc".
     1  At least one algorithm failed: do not use this build for evidence.
+```
+
+## rv-hashinv verify-case
+
+```text
+Usage: rv-hashinv verify-case [OPTIONS] CASE
+
+  Verify a whole case folder: case log, evidence registry and every run's audit log.
+
+  CASE is the case folder (the one that holds case.json). Example: E:\CASE-014
+
+Options:
+  --rehash  Also re-hash every registered item still reachable and compare it with the registry.
+            Default: off (only the registry's digest is checked). Example: --rehash
+  --help    Show this message and exit.
+
+  CHECKS:
+    - case-log.jsonl is an intact hash chain starting with case_created; case.json is unchanged;
+    - evidence/registry.json has the SHA-256 recorded at the last registry change;
+    - every run announced in the case log has an intact audit.jsonl (and valid timestamp
+      tokens), its case_linked entry points to its run_started entry, and the audit head
+      recorded at run_finished is its final entry (only timestamp_obtained may follow);
+    - with --rehash: every registered item still reachable at its registered path is read again
+      and its digests are compared with the registry (the latest registration of a path).
+
+  EXAMPLES:
+    rv-hashinv verify-case E:\CASE-014
+    rv-hashinv verify-case E:\CASE-014 --rehash
+
+  EXIT CODES:
+    0  The case folder is intact (warnings, e.g. a run still in progress or an item not
+       reachable for --rehash, are printed).
+    1  The folder is not a case folder (no case.json).
+    3  At least one check failed: the case was edited, truncated or re-ordered, or (--rehash)
+       an evidence file differs from the registry.
 ```
 

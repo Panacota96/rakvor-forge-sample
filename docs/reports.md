@@ -19,8 +19,10 @@ plus its English version — see [forensic-audit.md](forensic-audit.md#chain-of-
 
 **Brand.** HTML and PDF reports carry the Rakvor header band (RV mark, descriptor
 *FORENSICS | INCIDENT RESPONSE | SECURITY* and the tagline in the report language) on a light, printable page.
-When `--sign-cert` is used, each PDF shows the signer and certificate fingerprint and carries a digital signature
-that Acrobat or `pyhanko sign validate` can check. The statistics report shows the trusted timestamp (or a warning
+When `--sign-cert` is used, each report (PDF and HTML) shows the signer's certificate subject and its SHA-256
+fingerprint — the value logged at `signing_certificate_loaded`, also in the JSON reports as
+`run.pdf_signer_certificate_sha256` — and each PDF carries a digital signature that Acrobat or
+`pyhanko sign validate` can check (the test suite validates every signed PDF with pyHanko). The statistics report shows the trusted timestamp (or a warning
 that it is pending).
 
 **Size.** Item reports never list every other file: duplicate partners are capped at 10 names
@@ -68,6 +70,13 @@ pie showData
 | `EXECUTABLE_CONTENT` | A program is stored under a non-program name | That the program is malicious |
 | `DUPLICATE` | Identical content (same primary hash) in several files | Who copied it or when |
 | `UNREADABLE` | Reading failed, with the OS error | That the file is damaged |
+| `EVIDENCE_HASH_MISMATCH_WITH_CASE` (high, case folder) | The file differs from the evidence registered at intake | Who changed it, when, or why |
+| `EVIDENCE_NOT_IN_CASE_REGISTRY` (medium, case folder) | No registered item has this path or content | That the file is altered or irrelevant |
+| `REGISTRY_PATH_CONTENT_CHANGED` (medium, intake) | A registered path now holds other content (new evidence id) | Which version is the original |
+
+With `--case-dir` every report shows the item's **evidence id** (`E0001`…), the statistics report adds a *Case
+folder* section (registered / verified / mismatched / not registered), and the custody form uses the case id, the
+evidence id and the intake date — see [case-folder.md](case-folder.md).
 
 Wording lives in `i18n/en.json`, `es.json`, `fr.json` (same keys in all three — enforced by a test).
 

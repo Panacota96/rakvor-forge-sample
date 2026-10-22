@@ -16,6 +16,7 @@ flowchart TB
         H["hashing.py"]
         AN["analyzer.py<br/>(domain logic)"]
         AU["audit.py"]
+        CA["case.py<br/>case folder"]
         REP["report.py<br/>JSON · Jinja2 HTML · ReportLab PDF"]
         I18N["i18n.py"]
     end
@@ -23,7 +24,8 @@ flowchart TB
     GUI -- "RunConfig (+ UI actions)" --> RUN
     RUN -- "Event stream" --> CLI
     RUN -- "Event stream (Qt signal)" --> GUI
-    RUN --> IN & H & AN & AU & REP
+    RUN --> IN & H & AN & AU & REP & CA
+    CA --> AU
     REP --> I18N
 ```
 
@@ -35,6 +37,7 @@ flowchart TB
 | `hashing.py` | One read loop (1 MiB chunks) feeding 1–2 digests; known-answer self-test. | No |
 | `analyzer.py` | Signature detection and per-item findings. | **Yes — this is the domain logic** |
 | `audit.py` | Append-only hash-chained `audit.jsonl` + `audit.log`; `verify`. | No |
+| `case.py` | Shared case folder: `case.json`, hash-chained `case-log.jsonl` under a lock, evidence registry, `verify_case`. Role = `CASE_ROLE` (intake here, analysis in scaffolded tools). See [case-folder.md](case-folder.md). | No (flip `CASE_ROLE`) |
 | `report.py` | View models → Jinja2 HTML, ReportLab PDF, schema-versioned JSON. | Adapt wording/fields |
 | `events.py` | Event dicts (same JSON as the Rust profile); ETA computation. | No |
 | `envinfo.py` | `environment.json` (versions, OS, host, user, command line). | No |

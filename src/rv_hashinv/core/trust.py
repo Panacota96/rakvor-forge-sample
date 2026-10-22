@@ -28,6 +28,8 @@ from asn1crypto import tsp
 
 DEFAULT_TSA = "http://timestamp.digicert.com"
 TIMEOUT_S = 15
+# A time-stamp response is a few KiB; anything larger than 1 MiB is refused unread (same limit as the Rust profile).
+MAX_RESPONSE = 1 << 20
 
 
 class TimestampError(Exception):
@@ -93,10 +95,15 @@ def request_timestamp(digest: bytes, url: str, timeout: float = TIMEOUT_S) -> tu
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310 - URL chosen by the examiner
-            der = r.read()
+            der = r.read(MAX_RESPONSE + 1)
     except (urllib.error.URLError, OSError, TimeoutError) as e:
         raise TimestampError(f"cannot reach {url}: {getattr(e, 'reason', e)}") from e
-    gen, token = parse_response(der, digest, nonce)
+    if len(der) > MAX_RESPONSE:
+        raise TimestampError(f"cannot read TSA response: larger than {MAX_RESPONSE} bytes (refused)")
+    try:
+        gen, token = parse_response(der, digest, nonce)
+    except (ValueError, KeyError, TypeError) as e:  # asn1crypto parse errors
+        raise TimestampError(f"not a time-stamp response: {e}") from e
     return gen, token, der
 
 
@@ -113,16 +120,24 @@ def verify_timestamps(log_dir: Path, heads: dict[int, str]) -> list[str]:
     """Checks every timestamp-*.tsr: file digest as recorded, imprint == entry_hash of the covered entry."""
     problems = []
     for meta_path in sorted(log_dir.glob("timestamp-*.json")):
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        der = (log_dir / meta["file"]).read_bytes() if (log_dir / meta["file"]).exists() else b""
-        if hashlib.sha256(der).hexdigest() != meta["token_sha256"]:
-            problems.append(f"{meta['file']}: token file missing or altered")
-            continue
-        expected = heads.get(meta["covers_seq"])
         try:
-            parse_response(der, bytes.fromhex(expected or "00" * 32), None)
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            problems.append(f"{meta_path}: unreadable")
+            continue
+        file, seq = meta.get("file", ""), meta.get("covers_seq", 0)
+        expected = heads.get(seq)
+        if not expected:
+            problems.append(f"truncated: {file} covers entry #{seq}, which is not in the log (entries removed from the end)")
+            continue
+        der = (log_dir / file).read_bytes() if file and (log_dir / file).is_file() else b""
+        if hashlib.sha256(der).hexdigest() != meta.get("token_sha256"):
+            problems.append(f"{file}: token file missing or altered")
+            continue
+        try:
+            parse_response(der, bytes.fromhex(expected), None)
         except (TimestampError, ValueError) as e:
-            problems.append(f"{meta['file']}: {e} (entry #{meta['covers_seq']})")
+            problems.append(f"{file}: {e} (entry #{seq})")
     return problems
 
 
