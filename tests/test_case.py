@@ -243,7 +243,8 @@ def test_cli_case_flow_and_exit_codes(tmp_path, sample):
     assert not (case / "case-log.lock").exists()
     run_dir = _run_folder(r.stdout)
     assert run_dir.is_relative_to(case / "runs")
-    custody = next((run_dir / "reports" / "items").iterdir()) / "custody.fr.html"
+    # iterdir() order is file-system dependent: take the first item folder by name (00001-…)
+    custody = sorted((run_dir / "reports" / "items").iterdir())[0] / "custody.fr.html"
     assert "E0001" in custody.read_text("utf-8")
     r = cli("verify-case", case)
     assert r.returncode == 0 and f"3 registered items, {1 if intake else 2} runs verified" in r.stdout
