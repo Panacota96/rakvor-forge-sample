@@ -5,6 +5,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Entries are generated from
 [Conventional Commits](https://www.conventionalcommits.org/) by release-please and reviewed by a human.
 
+## [0.3.0](https://github.com/Panacota96/rakvor-forge-sample/compare/v0.2.0...v0.3.0) (2026-10-22)
+
+
+### Features
+
+* case folder, docs (theory, admissibility, installation, usage), source-auditable licence and review fixes ([7bdacf7](https://github.com/Panacota96/rakvor-forge-sample/commit/7bdacf7551ab91b9cd2f2a2cb695a47075033b97))
+
+
+### Bug Fixes
+
+* **release:** keep the product version out of the lockfile ([0fe16c5](https://github.com/Panacota96/rakvor-forge-sample/commit/0fe16c5fde58583e375b79fa218fa897bba8b315))
+
 ## [Unreleased]
 
 ### Added
