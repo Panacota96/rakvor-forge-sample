@@ -35,6 +35,14 @@ pub enum Event {
         status: String,
         findings: Vec<String>,
     },
+    /// Case folder only: the item's evidence id and how it relates to the case registry
+    /// (registered | already_registered | verified | mismatch | not_in_registry).
+    EvidenceLinked {
+        index: u64,
+        path: String,
+        evidence_id: Option<String>,
+        status: String,
+    },
     Progress {
         done: u64,
         total: u64,

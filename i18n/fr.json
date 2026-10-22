@@ -73,9 +73,25 @@
     "covers": "Couvre les entrées d'audit jusqu'à",
     "signature": "Signature électronique",
     "signed_by": "Signé par",
+    "certificate_sha256": "certificat SHA-256",
     "not_signed": "Ce PDF n'est pas signé électroniquement.",
     "custody": "Fiche de chaîne de possession",
-    "jurisdiction": "Juridiction"
+    "jurisdiction": "Juridiction",
+    "evidence_id": "ID de l'élément",
+    "case_registry": "Registre de l'affaire",
+    "case_status_registered": "Enregistré à la réception par cette analyse",
+    "case_status_already_registered": "Déjà enregistré (même chemin, même contenu)",
+    "case_status_verified": "Vérifié : identique à l'élément enregistré",
+    "case_status_mismatch": "NE CORRESPOND PAS à l'élément enregistré",
+    "case_status_not_in_registry": "Absent du registre de l'affaire",
+    "case_verification": "Dossier de l'affaire",
+    "registered": "Avec un ID d'élément de la réception",
+    "added": "Nouvellement enregistrés par cette analyse",
+    "verified": "Vérifiés par rapport au registre",
+    "mismatched": "Différents du registre",
+    "unregistered": "Absents du registre",
+    "intake_date": "Enregistré à la réception (UTC)",
+    "case_dir": "Dossier de l'affaire"
   },
   "severity": {
     "high": "Élevée",
@@ -108,6 +124,21 @@
       "title": "Fichier illisible",
       "shows": "La lecture a échoué : %{error}.",
       "does_not_prove": "Cela ne prouve pas que le fichier est endommagé ; des droits d'accès ou un verrou peuvent en être la cause."
+    },
+    "EVIDENCE_HASH_MISMATCH_WITH_CASE": {
+      "title": "Diffère de l'élément enregistré dans l'affaire",
+      "shows": "Le %{algorithm} de ce fichier est %{actual}, mais l'élément %{evidence_id} a été enregistré à la réception avec %{expected} : le fichier examiné n'est pas identique bit à bit à l'élément enregistré.",
+      "does_not_prove": "Qui a modifié le fichier, quand, ni si la modification était volontaire ; l'analyse a tout de même été menée pour que l'expert décide."
+    },
+    "EVIDENCE_NOT_IN_CASE_REGISTRY": {
+      "title": "Non enregistré dans l'affaire",
+      "shows": "Aucun élément de l'affaire %{case_id} n'a été enregistré avec ce chemin ou ce contenu ; sa continuité depuis la réception ne peut donc pas être établie.",
+      "does_not_prove": "Que le fichier soit altéré ou sans intérêt ; il peut simplement ne pas être passé par la réception."
+    },
+    "REGISTRY_PATH_CONTENT_CHANGED": {
+      "title": "Le chemin enregistré contient désormais un autre contenu",
+      "shows": "Ce chemin a déjà été enregistré comme %{previous_id} avec un autre contenu ; le contenu actuel reçoit un nouvel ID d'élément.",
+      "does_not_prove": "Quelle version est l'originale ni pourquoi le contenu a changé."
     }
   },
   "limitations": {
@@ -142,7 +173,8 @@
     "condition": "État du conditionnement / support",
     "examiner": "Expert",
     "signature_line": "Signature",
-    "observations": "Observations"
+    "observations": "Observations",
+    "intake_date": "Enregistré à la réception (UTC)"
   },
   "ui": {
     "window_title": "Rakvor",
@@ -189,6 +221,10 @@
     "open_report": "Ouvrir le rapport",
     "open_logs": "Ouvrir le dossier des journaux",
     "warnings": "Avertissements",
-    "lang_all": "Les trois (EN + ES + FR)"
+    "lang_all": "Les trois (EN + ES + FR)",
+    "case_dir": "Dossier de l'affaire",
+    "case_dir_hint": "facultatif : dossier partagé de l'affaire (relie les outils d'une même affaire)",
+    "out_from_case": "Dossier de sortie : fixé par le dossier de l'affaire",
+    "evidence_ids": "ID des éléments"
   }
 }

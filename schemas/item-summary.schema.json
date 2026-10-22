@@ -37,6 +37,14 @@
         },
         "file_name": {
           "type": "string"
+        },
+        "evidence_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^E[0-9]{4,}$",
+          "description": "Case folder only: evidence id from the case registry (null when the run is not linked to a case or the item is not registered)."
         }
       }
     },

@@ -8,6 +8,7 @@
   <div class="meta">
     <div>{{ t.run_id }}: <strong>{{ run.run_id }}</strong></div>
     <div>{{ t.item }} #{{ item.index }}</div>
+    {% if item.evidence_id %}<div>{{ t.evidence_id }}: <strong>{{ item.evidence_id }}</strong></div>{% endif %}
     {% if run.case_id %}<div>{{ t.case }}: {{ run.case_id }}</div>{% endif %}
   </div>
 </header>
@@ -19,6 +20,10 @@
   <div>{{ t.extension }}</div><div>{{ item.extension_text }}</div>
   <div>{{ t.detected_type }}</div><div>{{ item.detected_text }}</div>
   <div>{{ t.status }}</div><div>{{ item.status_label }}</div>
+  {% if case %}<div>{{ t.case }}</div><div>{{ case.case_id }}</div>
+  <div>{{ t.evidence_id }}</div><div class="mono">{{ item.evidence_id or t.none }}</div>
+  <div>{{ t.case_registry }}</div><div>{{ item.case_status_label }}</div>
+  {% if item.intake_utc %}<div>{{ t.intake_date }}</div><div>{{ item.intake_utc }}</div>{% endif %}{% endif %}
 </div>
 
 <h2>{{ t.hashes }}</h2>
@@ -44,5 +49,5 @@
 
 <h2>{{ t.limitations }}</h2>
 <ul>{% for l in limitations %}<li>{{ l }}</li>{% endfor %}</ul>
-<footer><div class="tagline">{{ brand.tagline }}</div>{{ t.generated_by }} {{ tool.name }} {{ tool.version }} · {{ run.run_id }} · {% if signature.signed %}{{ t.signed_by }} {{ signature.by }} (PDF){% else %}{{ t.not_signed }}{% endif %}</footer>
+<footer><div class="tagline">{{ brand.tagline }}</div>{{ t.generated_by }} {{ tool.name }} {{ tool.version }} · {{ run.run_id }} · {% if signature.signed %}{{ t.signed_by }} {{ signature.by }} (PDF; {{ t.certificate_sha256 }} <span class="mono">{{ signature.certificate_sha256 }}</span>){% else %}{{ t.not_signed }}{% endif %}</footer>
 </main></body></html>

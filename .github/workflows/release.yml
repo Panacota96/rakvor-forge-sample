@@ -44,7 +44,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.TAG || github.sha }}
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust toolchain pinned in rust-toolchain.toml (the release compiler is recorded in environment.json)
+        run: rustup toolchain install && rustc --version
       - name: Build (static CRT, see .cargo/config.toml)
         run: cargo build --release --locked -p rv-hashinv-cli -p rv-hashinv-gui
       - name: Code signing of the executables (runs only when the SIGN_PFX_BASE64 secret exists)

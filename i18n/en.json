@@ -73,9 +73,25 @@
     "covers": "Covers audit entries up to",
     "signature": "Digital signature",
     "signed_by": "Signed by",
+    "certificate_sha256": "certificate SHA-256",
     "not_signed": "This PDF is not digitally signed.",
     "custody": "Chain-of-custody form",
-    "jurisdiction": "Jurisdiction"
+    "jurisdiction": "Jurisdiction",
+    "evidence_id": "Evidence ID",
+    "case_registry": "Case registry",
+    "case_status_registered": "Registered at intake by this run",
+    "case_status_already_registered": "Already registered (same path, same content)",
+    "case_status_verified": "Verified: identical to the registered evidence",
+    "case_status_mismatch": "MISMATCH with the registered evidence",
+    "case_status_not_in_registry": "Not in the case registry",
+    "case_verification": "Case folder",
+    "registered": "With an evidence ID from intake",
+    "added": "Newly registered by this run",
+    "verified": "Verified against the registry",
+    "mismatched": "Different from the registry",
+    "unregistered": "Not in the registry",
+    "intake_date": "Registered at intake (UTC)",
+    "case_dir": "Case folder"
   },
   "severity": {
     "high": "High",
@@ -108,6 +124,21 @@
       "title": "File could not be read",
       "shows": "Reading failed: %{error}.",
       "does_not_prove": "It does not show that the file is damaged; permissions or locks can cause this."
+    },
+    "EVIDENCE_HASH_MISMATCH_WITH_CASE": {
+      "title": "Differs from the evidence registered in the case",
+      "shows": "The %{algorithm} of this file is %{actual}, but evidence %{evidence_id} was registered at intake with %{expected}: the file examined is not bit-identical to the registered item.",
+      "does_not_prove": "Who changed the file, when, or whether the change was deliberate; the analysis still ran so the examiner can decide."
+    },
+    "EVIDENCE_NOT_IN_CASE_REGISTRY": {
+      "title": "Not registered in the case",
+      "shows": "No item of case %{case_id} was registered with this path or this content, so its continuity from intake cannot be shown.",
+      "does_not_prove": "That the file is altered or irrelevant; it may simply not have gone through intake."
+    },
+    "REGISTRY_PATH_CONTENT_CHANGED": {
+      "title": "Registered path now holds different content",
+      "shows": "This path was registered earlier as %{previous_id} with other content; the current content gets a new evidence ID.",
+      "does_not_prove": "Which version is the original or why the content changed."
     }
   },
   "limitations": {
@@ -142,7 +173,8 @@
     "condition": "Condition of packaging / media",
     "examiner": "Examiner",
     "signature_line": "Signature",
-    "observations": "Observations"
+    "observations": "Observations",
+    "intake_date": "Registered at intake (UTC)"
   },
   "ui": {
     "window_title": "Rakvor",
@@ -189,6 +221,10 @@
     "open_report": "Open report",
     "open_logs": "Open log folder",
     "warnings": "Warnings",
-    "lang_all": "All three (EN + ES + FR)"
+    "lang_all": "All three (EN + ES + FR)",
+    "case_dir": "Case folder",
+    "case_dir_hint": "optional: shared case folder (links the tools of one case)",
+    "out_from_case": "Output folder: set by the case folder",
+    "evidence_ids": "Evidence IDs"
   }
 }

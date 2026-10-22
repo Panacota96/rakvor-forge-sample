@@ -16,6 +16,7 @@ flowchart TB
         H["hash.rs"]
         AN["analyzer.rs<br/>(domain logic)"]
         AU["audit.rs"]
+        CA["case.rs<br/>case folder"]
         REP["report/<br/>JSON · HTML · PDF"]
         I18N["i18n.rs"]
     end
@@ -23,7 +24,8 @@ flowchart TB
     GUI -- "RunConfig (+ UI actions)" --> RUN
     RUN -- "Event stream" --> CLI
     RUN -- "Event stream (mpsc)" --> GUI
-    RUN --> IN & H & AN & AU & REP
+    RUN --> IN & H & AN & AU & REP & CA
+    CA --> AU
     REP --> I18N
 ```
 
@@ -35,6 +37,7 @@ flowchart TB
 | `hash.rs` | One read loop (1 MiB chunks) feeding 1–2 digests; known-answer self-test. | No |
 | `analyzer.rs` | Signature detection and per-item findings. | **Yes — this is the domain logic** |
 | `audit.rs` | Append-only hash-chained `audit.jsonl` + `audit.log`; `verify`. | No |
+| `case.rs` | Shared case folder: `case.json`, hash-chained `case-log.jsonl` under a lock, evidence registry, `verify_case`. Role = `CASE_ROLE` (intake here, analysis in scaffolded tools). See [case-folder.md](case-folder.md). | No (flip `CASE_ROLE`) |
 | `report/` | View models → minijinja HTML, built-in PDF writer, schema-versioned JSON. | Adapt wording/fields |
 | `events.rs` | Typed events; ETA computation. | No |
 | `env.rs` | `environment.json` (versions, OS, host, user, command line). | No |

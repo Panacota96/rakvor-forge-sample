@@ -34,7 +34,8 @@
       ]
     },
     "evidence_id": {
-      "type": "string"
+      "type": "string",
+      "description": "The case registry id (E0001...) when the run is linked to a case folder, else <RUN-ID>-<NNNNN>."
     },
     "item": {
       "type": "object",
@@ -103,6 +104,13 @@
       "items": {
         "type": "object"
       }
+    },
+    "intake_utc": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Case folder only: when the item was registered at intake."
     }
   }
 }

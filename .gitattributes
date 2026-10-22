@@ -6,3 +6,4 @@
 *.jpg binary
 *.pdf binary
 examples/sample/evidence/** binary
+tests/golden/*.zip binary

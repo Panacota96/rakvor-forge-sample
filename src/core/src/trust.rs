@@ -267,17 +267,20 @@ pub fn verify_timestamps(log_dir: &Path, heads: &BTreeMap<u64, String>) -> Vec<S
                 continue;
             }
         };
+        let seq = meta["covers_seq"].as_u64().unwrap_or(0);
         let file = meta["file"].as_str().unwrap_or_default();
+        let Some(head) = heads.get(&seq).and_then(|h| crate::hash::hex_decode(h)) else {
+            problems.push(format!(
+                "truncated: {} covers entry #{}, which is not in the log (entries removed from the end)",
+                file, seq
+            ));
+            continue;
+        };
         let der = std::fs::read(log_dir.join(file)).unwrap_or_default();
         if hash_bytes(&der, HashAlgo::Sha256) != meta["token_sha256"].as_str().unwrap_or_default() {
             problems.push(format!("{}: token file missing or altered", file));
             continue;
         }
-        let seq = meta["covers_seq"].as_u64().unwrap_or(0);
-        let head = heads
-            .get(&seq)
-            .and_then(|h| crate::hash::hex_decode(h))
-            .unwrap_or_default();
         if let Err(e) = parse_response(&der, &head, None) {
             problems.push(format!("{}: {} (entry #{})", file, e, seq));
         }

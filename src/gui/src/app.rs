@@ -31,6 +31,8 @@ pub struct HashInvApp {
     started: Option<Instant>,
     notice: Option<String>,
     themed: bool,
+    /// Case folder being typed; applied (and audited) when the field loses focus.
+    case_entry: String,
 }
 
 /// Applies the Rakvor dark theme.
@@ -63,6 +65,7 @@ impl HashInvApp {
             started: None,
             notice: None,
             themed: false,
+            case_entry: String::new(),
         }
     }
 
@@ -275,6 +278,27 @@ impl HashInvApp {
             if ui.checkbox(&mut rec, self.state.tr("subfolders")).changed() {
                 self.state.set_recursive(rec);
             }
+            ui.horizontal(|ui| {
+                ui.label(self.state.tr("case_dir"));
+                let hint = self.state.tr("case_dir_hint");
+                let r = ui.add(
+                    egui::TextEdit::singleline(&mut self.case_entry)
+                        .hint_text(hint)
+                        .desired_width(320.0),
+                );
+                if r.lost_focus() {
+                    let entry = self.case_entry.clone();
+                    self.state.set_case_dir(&entry);
+                }
+                #[cfg(windows)]
+                if ui.button(self.state.tr("browse")).clicked() {
+                    if let Some(d) = rfd::FileDialog::new().pick_folder() {
+                        self.case_entry = d.display().to_string();
+                        let entry = self.case_entry.clone();
+                        self.state.set_case_dir(&entry);
+                    }
+                }
+            });
         });
     }
 
@@ -322,6 +346,7 @@ impl HashInvApp {
             tr("case_hint"),
             tr("lang_all"),
         );
+        let l_locked = tr("out_from_case");
         ui.add_enabled_ui(enabled, |ui| {
             egui::Grid::new("report-grid")
                 .num_columns(2)
@@ -355,14 +380,24 @@ impl HashInvApp {
                     ui.end_row();
                     ui.label(l_out);
                     ui.horizontal(|ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.state.out_dir)
-                                .desired_width(300.0),
-                        );
-                        #[cfg(windows)]
-                        if ui.button(&l_browse).clicked() {
-                            if let Some(d) = rfd::FileDialog::new().pick_folder() {
-                                self.state.out_dir = d.display().to_string();
+                        if self.state.out_locked() {
+                            // Rule (state.rs): the case folder decides where the run is written.
+                            let mut shown = self.state.out_dir_display();
+                            ui.add_enabled(
+                                false,
+                                egui::TextEdit::singleline(&mut shown).desired_width(300.0),
+                            )
+                            .on_disabled_hover_text(&l_locked);
+                        } else {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.state.out_dir)
+                                    .desired_width(300.0),
+                            );
+                            #[cfg(windows)]
+                            if ui.button(&l_browse).clicked() {
+                                if let Some(d) = rfd::FileDialog::new().pick_folder() {
+                                    self.state.out_dir = d.display().to_string();
+                                }
                             }
                         }
                         let _ = &l_browse;
@@ -540,6 +575,25 @@ impl HashInvApp {
                         o.low,
                         o.info
                     ));
+                    let lines = self.state.evidence_lines();
+                    if !lines.is_empty() {
+                        egui::CollapsingHeader::new(format!(
+                            "{} ({})",
+                            self.state.tr("evidence_ids"),
+                            lines.len()
+                        ))
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            egui::ScrollArea::vertical()
+                                .max_height(120.0)
+                                .id_salt("evidence-ids")
+                                .show(ui, |ui| {
+                                    for l in &lines {
+                                        ui.monospace(l);
+                                    }
+                                });
+                        });
+                    }
                     ui.horizontal(|ui| {
                         if ui.button(self.state.tr("open_report")).clicked() {
                             open_path(&o.report);

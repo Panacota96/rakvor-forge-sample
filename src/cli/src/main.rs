@@ -5,7 +5,8 @@ use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use rv_hashinv_core::trust::{self, DEFAULT_TSA};
 use rv_hashinv_core::{
-    Event, HashAlgo, RunConfig, TOOL_NAME, TOOL_VERSION, audit, hash, i18n, run,
+    CASE_ROLE, Event, HashAlgo, RunConfig, TOOL_NAME, TOOL_VERSION, audit, case, hash, i18n, run,
+    verify,
 };
 use std::io::Write;
 use std::path::PathBuf;
@@ -30,7 +31,11 @@ DESCRIPTION:
        another name and duplicated content;
     4. writes a technical report and a customer-friendly summary (HTML, PDF and JSON).
   Each run also writes a statistics report and an audit trail under <OUT>/logs/<RUN-ID>/.
-  Every action is appended to a hash-chained log that `rv-hashinv verify-log` can check later.";
+  Every action is appended to a hash-chained log that `rv-hashinv verify-log` can check later.
+
+  CASE FOLDER (--case-dir): Rakvor tools share one folder per case. rv-hashinv is the intake tool: it
+  registers every hashed file in evidence/registry.json (evidence ids E0001, E0002, ...) so later tools
+  can prove they examined bit-identical copies. `rv-hashinv verify-case <CASE>` checks it all.";
 
 const SCAN_AFTER_HELP: &str = "\
 EXAMPLES:
@@ -42,12 +47,22 @@ EXAMPLES:
     rv-hashinv scan --input-list files.txt --lang all --progress jsonl > events.jsonl
   Verify the audit log afterwards:
     rv-hashinv verify-log rakvor-out/logs/<RUN-ID>/audit.jsonl
+  Open a case folder and register the evidence (intake), then verify the whole case:
+    rv-hashinv scan -i D:\\evidence -r --case-dir E:\\CASE-014 --case CASE-014 --jurisdiction fr
+    rv-hashinv verify-case E:\\CASE-014
+  Re-examine two registered items of the case:
+    rv-hashinv scan --case-dir E:\\CASE-014 --evidence E0001,E0002
 
 EXIT CODES:
   0    Completed; no high-severity finding.
-  1    Runtime error (input not found, output not writable, ...). See the audit log.
+  1    Runtime error (input not found, output not writable, case log locked, ...).
+       See the audit log.
   2    Usage error (unknown option, more than two hash algorithms, unsupported language).
-  3    Completed with at least one high-severity finding (e.g. unreadable file, program under another name).
+       With --case-dir: folder of another case or schema, --case missing when creating the
+       case, unknown evidence id.
+  3    Completed with at least one high-severity finding (e.g. unreadable file, program under
+       another name, evidence that differs from the case registry), or the case folder fails
+       verification (nothing is written to it).
   130  Cancelled with Ctrl+C. Partial reports and the cancellation are written to the audit log.
 
 FILES WRITTEN:
@@ -60,17 +75,29 @@ FILES WRITTEN:
   <OUT>/reports/<RUN-ID>/items/<NNNNN>-<NAME>/summary.json|.<LANG>.html|.<LANG>.pdf     Customer summary.
   <OUT>/reports/<RUN-ID>/items/<NNNNN>-<NAME>/custody.json|.<es|fr>.html|.pdf|.en.html|.pdf  Custody form.
   <OUT>/logs/<RUN-ID>/timestamp-<SEQ>.tsr|.json  RFC 3161 token for the audit chain head.
+  With --case-dir <CASE>, logs/ and reports/ go to <CASE>/runs/rv-hashinv/<RUN-ID>/, plus:
+  <CASE>/case.json                        Case id, jurisdiction, creation (written once).
+  <CASE>/case-log.jsonl                   Hash-chained case log of every tool: case_created,
+                                          run_started, evidence_registered, run_finished.
+  <CASE>/evidence/registry.json|.csv      Evidence registry: E0001..., path, size, hashes.
 
 FORENSIC NOTES:
   - Evidence is opened read-only and never modified; modification times are compared before and after.
   - Work on a verified copy (write-blocked image or export), not on original media.
   - Each audit entry stores the SHA-256 of the previous one; editing, deleting or re-ordering any
-    line is detected by `verify-log`. Keep the log folder with the reports.
+    line is detected by `verify-log`. Removing the last lines is detected only against a record
+    kept outside the log: the RFC 3161 timestamp or, with --case-dir, the case log. Keep the log
+    folder with the reports.
   - A file without findings is not proven authentic; read the Limitations section of each report.
   - MD5 and SHA-1 are accepted for compatibility with older case files; pair them with SHA-256 or BLAKE3.
   - The chain head is timestamped by an RFC 3161 authority (proves when the log existed). Offline? The run
     finishes with `timestamp_pending`; run `rv-hashinv timestamp <LOG>` later.
-  - With --sign-cert every PDF is signed with the examiner's certificate; the password is never logged.";
+  - With --sign-cert every PDF is signed with the examiner's certificate; the password is never logged.
+  - Case folder: every tool re-verifies case-log.jsonl and the registry digest before
+    writing, and refuses a broken case (exit 3). Appends happen under case-log.lock; a lock
+    older than 10 minutes is reported as stale and never deleted automatically.
+  - Each run's audit.jsonl records case_linked (the case-log entry it started from); the case
+    log records the run's final audit head, so the two chains vouch for each other.";
 
 #[derive(Parser)]
 #[command(name = TOOL_NAME, version = TOOL_VERSION, about = ABOUT, long_about = LONG_ABOUT, max_term_width = 100,
@@ -84,17 +111,31 @@ struct Cli {
 enum Command {
     /// Hash, check and report on a file, a folder or a list of files.
     #[command(long_about = LONG_ABOUT, after_long_help = SCAN_AFTER_HELP)]
-    Scan(ScanArgs),
-    /// Verify that an audit log (audit.jsonl) has not been edited, truncated or re-ordered.
+    Scan(Box<ScanArgs>),
+    /// Verify an audit log (audit.jsonl): edited, deleted or re-ordered entries, and truncation.
     #[command(after_long_help = "\
+CHECKS:
+  - every entry links to the previous one (hash chain): an edited, deleted or re-ordered entry
+    breaks it;
+  - every timestamp token (timestamp-<SEQ>.tsr) covers the hash of the entry it names, and every
+    timestamp_obtained entry still has its token file;
+  - truncation: a chain alone cannot show that entries were removed from its end. The log must
+    still contain the entry covered by its RFC 3161 timestamp (covers_seq) and, for a run inside
+    a case folder (<CASE>/runs/<TOOL>/<RUN-ID>/logs), end with the audit head that the case log
+    recorded at run_finished (only timestamp_obtained may follow). Entries after the last
+    anchored one are listed as not provable; with neither record the output says
+    \"truncation not detectable without a timestamp or case record\".
+
 EXAMPLES:
   rv-hashinv verify-log rakvor-out/logs/20261019T101500Z-a1b2c3/audit.jsonl
   rv-hashinv verify-log rakvor-out/logs/20261019T101500Z-a1b2c3
+  rv-hashinv verify-log E:\\CASE-014\\runs\\rv-hashinv\\20261019T101500Z-a1b2c3\\logs
 
 EXIT CODES:
-  0  The chain is intact.
+  0  The chain is intact and agrees with its timestamps and case record (if any).
   1  The log cannot be read.
-  3  The chain is broken: at least one entry was edited, deleted or re-ordered.")]
+  3  The chain is broken (an entry was edited, deleted or re-ordered), a timestamp does not
+     match, or the log is shorter than its timestamp or case record says (truncated).")]
     VerifyLog {
         /// Path to audit.jsonl, or to the run's log folder that contains it.
         ///
@@ -119,7 +160,7 @@ EXAMPLES:
 EXIT CODES:
   0  Timestamp obtained and logged.
   1  The TSA could not be reached (nothing changed; try again).
-  3  The log is broken: no timestamp is added to a broken chain.")]
+  3  The log is missing or broken: no timestamp is added.")]
     Timestamp {
         /// The run's log folder (or its audit.jsonl).
         ///
@@ -135,6 +176,38 @@ EXIT CODES:
         /// Example: --actor "Ana Ruiz"
         #[arg(short, long, value_name = "NAME", verbatim_doc_comment)]
         actor: Option<String>,
+    },
+    /// Verify a whole case folder: case log, evidence registry and every run's audit log.
+    #[command(after_long_help = "\
+CHECKS:
+  - case-log.jsonl is an intact hash chain starting with case_created; case.json is unchanged;
+  - evidence/registry.json has the SHA-256 recorded at the last registry change;
+  - every run announced in the case log has an intact audit.jsonl (and valid timestamp
+    tokens), its case_linked entry points to its run_started entry, and the audit head
+    recorded at run_finished is its final entry (only timestamp_obtained may follow);
+  - with --rehash: every registered item still reachable at its registered path is read again
+    and its digests are compared with the registry (the latest registration of a path).
+
+EXAMPLES:
+  rv-hashinv verify-case E:\\CASE-014
+  rv-hashinv verify-case E:\\CASE-014 --rehash
+
+EXIT CODES:
+  0  The case folder is intact (warnings, e.g. a run still in progress or an item not
+     reachable for --rehash, are printed).
+  1  The folder is not a case folder (no case.json).
+  3  At least one check failed: the case was edited, truncated or re-ordered, or (--rehash)
+     an evidence file differs from the registry.")]
+    VerifyCase {
+        /// The case folder (the one that holds case.json).
+        ///
+        /// Example: E:\CASE-014
+        case: PathBuf,
+        /// Also re-hash every registered item still reachable and compare it with the registry.
+        /// Default: off (only the registry's digest is checked)
+        /// Example: --rehash
+        #[arg(long, verbatim_doc_comment)]
+        rehash: bool,
     },
     /// Print the full help of every command as Markdown (used to generate docs/usage-cli.md).
     #[command(hide = true)]
@@ -156,13 +229,13 @@ struct ScanArgs {
     /// File or folder to review. Repeat for several.
     ///
     /// Folders are reviewed one level deep unless --recursive is given. Symbolic links are not followed.
-    /// Default: none (required unless --input-list is given).
+    /// Default: none (required unless --input-list, --case-dir or --evidence is given).
     /// Example: --input D:\evidence --input E:\phone-export\chat.txt
     #[arg(
         short,
         long = "input",
         value_name = "PATH",
-        required_unless_present = "input_list",
+        required_unless_present_any = ["input_list", "case_dir", "evidence"],
         verbatim_doc_comment
     )]
     inputs: Vec<PathBuf>,
@@ -195,7 +268,7 @@ struct ScanArgs {
     )]
     hashes: Vec<String>,
 
-    /// Folder where logs/ and reports/ are created. Created if missing.
+    /// Folder where logs/ and reports/ are created. Created if missing. Ignored with --case-dir.
     ///
     /// Default: ./rakvor-out. Example: --out E:\case-014\rv-hashinv
     #[arg(
@@ -227,8 +300,8 @@ struct ScanArgs {
     #[arg(short, long, value_name = "NAME", verbatim_doc_comment)]
     actor: Option<String>,
 
-    /// Case or engagement identifier printed on the reports.
-    ///
+    /// Case or engagement identifier printed on the reports. With --case-dir it names the case
+    /// when the folder is created, and must match case.json afterwards (it can be left out).
     /// Default: none. Example: --case CASE-2026-014
     #[arg(short, long = "case", value_name = "ID", verbatim_doc_comment)]
     case_id: Option<String>,
@@ -249,7 +322,7 @@ struct ScanArgs {
     progress: ProgressMode,
 
     /// Chain-of-custody form per item: co (Colombia, Fiscalía style, Spanish) or fr (France, scellés, French).
-    /// An English copy is always added.
+    /// An English copy is always added. With --case-dir the case's jurisdiction applies.
     /// Default: co
     /// Example: --jurisdiction fr
     #[arg(short, long, value_name = "CC", default_value = "co", value_parser = ["co", "fr"], verbatim_doc_comment, hide_default_value = true, hide_possible_values = true)]
@@ -285,13 +358,35 @@ struct ScanArgs {
         hide_default_value = true
     )]
     sign_pass_env: String,
+
+    /// Shared case folder that links the Rakvor tools of one case (created with --case if missing).
+    /// Outputs go to <DIR>/runs/rv-hashinv/<RUN-ID>/; every hashed file is registered in
+    /// <DIR>/evidence/registry.json; the run is recorded in <DIR>/case-log.jsonl.
+    /// With no --input, every registered item is examined again.
+    /// Default: none (standalone run in --out)
+    /// Example: --case-dir E:\CASE-014 --case CASE-014
+    #[arg(long, value_name = "DIR", verbatim_doc_comment)]
+    case_dir: Option<PathBuf>,
+
+    /// Registered evidence ids to examine (needs --case-dir), comma-separated or repeated.
+    /// Default: none (the --input files, or every registered item)
+    /// Example: --evidence E0001,E0007
+    #[arg(
+        short = 'E',
+        long = "evidence",
+        value_name = "IDS",
+        requires = "case_dir",
+        verbatim_doc_comment
+    )]
+    evidence: Vec<String>,
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     ExitCode::from(match cli.command {
-        Command::Scan(a) => scan(a),
+        Command::Scan(a) => scan(*a),
         Command::VerifyLog { log } => verify_log(log),
+        Command::VerifyCase { case, rehash } => verify_case(case, rehash),
         Command::SelfTest => self_test(),
         Command::Timestamp {
             log,
@@ -333,6 +428,22 @@ fn scan(a: ScanArgs) -> u8 {
         Ok(l) => l,
         Err(e) => return usage_error(&e),
     };
+    let evidence_ids = match case::parse_evidence_ids(&a.evidence) {
+        Ok(ids) => ids,
+        Err(e) => return usage_error(&e.message),
+    };
+    if let Some(dir) = &a.case_dir {
+        // Case problems found before the run map to their own exit codes (2 usage, 3 broken case).
+        if let Err(e) = case::preflight(dir, a.case_id.as_deref(), &evidence_ids) {
+            return match e.exit_code() {
+                EXIT_USAGE => usage_error(&e.message),
+                code => {
+                    eprintln!("error: {}", e.message);
+                    code
+                }
+            };
+        }
+    }
 
     let cancel = Arc::new(AtomicBool::new(false));
     let c = cancel.clone();
@@ -363,6 +474,9 @@ fn scan(a: ScanArgs) -> u8 {
             .as_ref()
             .and_then(|_| password(&a.sign_pass_env)),
         sign_cert: a.sign_cert.clone(),
+        case_dir: a.case_dir.clone(),
+        evidence_ids,
+        case_role: CASE_ROLE,
     };
 
     let bar = match a.progress {
@@ -461,6 +575,20 @@ fn scan(a: ScanArgs) -> u8 {
                     logs = s.log_dir.display()
                 );
                 let _ = writeln!(std::io::stdout(), "{}", out);
+                if let Some(c) = &s.case {
+                    let t = &c.tally;
+                    let _ = writeln!(
+                        std::io::stdout(),
+                        "  case:   {} ({}) registered {} (new {}), verified {}, mismatched {}, not in registry {}",
+                        c.case_id,
+                        c.role,
+                        t.registered,
+                        t.added,
+                        t.verified,
+                        t.mismatched,
+                        t.unregistered
+                    );
+                }
             }
             if s.cancelled {
                 EXIT_CANCELLED
@@ -479,10 +607,8 @@ fn password(env: &str) -> Option<String> {
     }
     use std::io::IsTerminal;
     if std::io::stdin().is_terminal() {
-        eprint!("Certificate password: ");
-        let mut line = String::new();
-        std::io::stdin().read_line(&mut line).ok()?;
-        return Some(line.trim_end_matches(['\r', '\n']).to_string());
+        // No echo: the password never appears on screen or in a terminal recording.
+        return rpassword::prompt_password("Certificate password: ").ok();
     }
     None
 }
@@ -493,6 +619,13 @@ fn timestamp(log: PathBuf, tsa_url: String, actor: Option<String>) -> u8 {
     } else {
         log
     };
+    if !dir.join("audit.jsonl").is_file() {
+        eprintln!(
+            "error: no audit log at {}: nothing to timestamp",
+            dir.join("audit.jsonl").display()
+        );
+        return EXIT_FINDINGS;
+    }
     let mut audit_log =
         match audit::AuditLog::resume(&dir, &actor.unwrap_or_else(rv_hashinv_core::env::os_user)) {
             Ok(l) => l,
@@ -526,52 +659,84 @@ fn verify_log(log: PathBuf) -> u8 {
     } else {
         log
     };
-    let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-    let checked = audit::verify(&path).and_then(|n| {
-        let problems = trust::verify_timestamps(&dir, &audit::heads(&path));
-        if problems.is_empty() {
-            Ok(n)
-        } else {
-            Err(problems)
+    let v = match verify::verify_log(&path) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            return EXIT_ERROR;
         }
-    });
-    match checked {
-        Ok(n) => {
-            println!("OK  {} entries, chain intact: {}", n, path.display());
-            let mut metas: Vec<_> = std::fs::read_dir(&dir)
-                .map(|d| d.filter_map(|e| e.ok()).map(|e| e.path()).collect())
-                .unwrap_or_default();
-            metas.retain(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("timestamp-") && n.ends_with(".json"))
-            });
-            metas.sort();
-            for m in metas {
-                if let Ok(v) = std::fs::read_to_string(&m)
-                    .map(|t| serde_json::from_str::<serde_json::Value>(&t).unwrap_or_default())
-                {
-                    println!(
-                        "    timestamp {} by {} covers entry #{}",
-                        v["gen_time"].as_str().unwrap_or("?"),
-                        v["tsa"].as_str().unwrap_or("?"),
-                        v["covers_seq"]
-                    );
-                }
-            }
-            EXIT_OK
+    };
+    if v.problems.is_empty() {
+        println!(
+            "OK  {} entries, chain intact: {}",
+            v.entries,
+            path.display()
+        );
+        for t in &v.timestamps {
+            println!("    {}", t);
         }
-        Err(problems) if problems.len() == 1 && problems[0].starts_with("cannot open") => {
-            eprintln!("error: {}", problems[0]);
-            EXIT_ERROR
+        println!("    {}", v.truncation);
+    } else {
+        println!("BROKEN  {}", path.display());
+        for p in &v.problems {
+            println!("  - {}", p);
         }
-        Err(problems) => {
-            println!("BROKEN  {}", path.display());
-            for p in problems {
-                println!("  - {}", p);
-            }
-            EXIT_FINDINGS
+    }
+    for w in &v.warnings {
+        println!("  warning: {}", w);
+    }
+    if v.problems.is_empty() {
+        EXIT_OK
+    } else {
+        EXIT_FINDINGS
+    }
+}
+
+fn verify_case(dir: PathBuf, rehash: bool) -> u8 {
+    if !dir.join(case::CASE_FILE).is_file() {
+        eprintln!(
+            "error: {} is not a case folder (no {})",
+            dir.display(),
+            case::CASE_FILE
+        );
+        return EXIT_ERROR;
+    }
+    let mut v = case::verify_case(&dir);
+    let rehashed = rehash.then(|| case::rehash_registry(&dir, &mut v));
+    if v.problems.is_empty() {
+        println!(
+            "OK  case {}: {} case-log entries, {} registered items, {} runs verified: {}",
+            v.case_id,
+            v.entries,
+            v.registry_items,
+            v.runs,
+            dir.display()
+        );
+        if let Some(r) = &rehashed {
+            println!(
+                "    re-hashed {} of {} registered items: {} match the registry",
+                r.checked, r.registered, r.matched
+            );
         }
+        for w in &v.warnings {
+            println!("  warning: {}", w);
+        }
+        EXIT_OK
+    } else {
+        println!("BROKEN  case {}: {}", v.case_id, dir.display());
+        for p in &v.problems {
+            println!("  - {}", p);
+        }
+        if let Some(r) = &rehashed {
+            println!(
+                "    re-hashed {} of {} registered items: {} match the registry",
+                r.checked, r.registered, r.matched
+            );
+        }
+        for w in &v.warnings {
+            println!("  warning: {}", w);
+        }
+        EXIT_FINDINGS
     }
 }
 
@@ -602,7 +767,7 @@ fn docs_cli() -> String {
     let mut out = String::from(
         "# Command-line reference\n\n<!-- Generated by `rv-hashinv docs-cli`. Do not edit by hand: CI fails if this file differs. -->\n\n",
     );
-    out.push_str("```mermaid\nflowchart LR\n  A[rv-hashinv] --> B[scan]\n  A --> C[verify-log]\n  A --> D[self-test]\n  A --> T[timestamp]\n  T --> E\n  B --> E[(logs/RUN-ID)]\n  B --> F[(reports/RUN-ID)]\n  C --> E\n```\n\n");
+    out.push_str("```mermaid\nflowchart LR\n  A[rv-hashinv] --> B[scan]\n  A --> C[verify-log]\n  A --> D[self-test]\n  A --> T[timestamp]\n  A --> V[verify-case]\n  T --> E\n  B --> E[(logs/RUN-ID)]\n  B --> F[(reports/RUN-ID)]\n  B -. --case-dir .-> K[(CASE folder)]\n  V --> K\n  C --> E\n```\n\n");
     out.push_str(&format!(
         "## rv-hashinv\n\n```text\n{}\n```\n\n",
         root.render_long_help().to_string().trim_end()

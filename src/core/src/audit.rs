@@ -15,6 +15,32 @@ use std::path::{Path, PathBuf};
 
 pub const GENESIS: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
+/// One chained entry (shared by audit.jsonl and the case log `case-log.jsonl`), with its `entry_hash` set.
+pub fn build_entry(
+    seq: u64,
+    run_id: &str,
+    actor: &str,
+    action: &str,
+    item: Option<&str>,
+    details: Value,
+    prev: &str,
+) -> Map<String, Value> {
+    let mut m = Map::new();
+    m.insert("seq".into(), json!(seq));
+    m.insert("ts_utc".into(), json!(utc_now()));
+    m.insert("run_id".into(), json!(run_id));
+    m.insert("actor".into(), json!(actor));
+    m.insert("action".into(), json!(action));
+    if let Some(i) = item {
+        m.insert("item".into(), json!(i));
+    }
+    m.insert("details".into(), details);
+    m.insert("prev_entry_hash".into(), json!(prev));
+    let h = entry_hash(&m);
+    m.insert("entry_hash".into(), json!(h));
+    m
+}
+
 pub struct AuditLog {
     jsonl: File,
     text: File,
@@ -90,20 +116,17 @@ impl AuditLog {
     /// Appends one action. Returns its sequence number.
     pub fn record(&mut self, action: &str, item: Option<&str>, details: Value) -> io::Result<u64> {
         self.seq += 1;
-        let ts = utc_now();
-        let mut m = Map::new();
-        m.insert("seq".into(), json!(self.seq));
-        m.insert("ts_utc".into(), json!(ts));
-        m.insert("run_id".into(), json!(self.run_id));
-        m.insert("actor".into(), json!(self.actor));
-        m.insert("action".into(), json!(action));
-        if let Some(i) = item {
-            m.insert("item".into(), json!(i));
-        }
-        m.insert("details".into(), details);
-        m.insert("prev_entry_hash".into(), json!(self.head));
-        let h = entry_hash(&m);
-        m.insert("entry_hash".into(), json!(h));
+        let m = build_entry(
+            self.seq,
+            &self.run_id,
+            &self.actor,
+            action,
+            item,
+            details,
+            &self.head,
+        );
+        let ts = m["ts_utc"].as_str().unwrap_or_default().to_string();
+        let h = m["entry_hash"].as_str().unwrap_or_default().to_string();
         writeln!(
             self.jsonl,
             "{}",

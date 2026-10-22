@@ -233,6 +233,14 @@
           },
           "report_folder": {
             "type": "string"
+          },
+          "evidence_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^E[0-9]{4,}$",
+            "description": "Case folder only: evidence id from the case registry (null when the run is not linked to a case or the item is not registered)."
           }
         }
       }
@@ -261,6 +269,47 @@
         },
         "log_dir": {
           "type": "string"
+        }
+      }
+    },
+    "case": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Present when the run works in a shared case folder (--case-dir).",
+      "required": [
+        "case_id",
+        "role",
+        "case_dir",
+        "counts"
+      ],
+      "properties": {
+        "case_id": {
+          "type": "string"
+        },
+        "role": {
+          "enum": [
+            "intake",
+            "analysis"
+          ]
+        },
+        "case_dir": {
+          "type": "string"
+        },
+        "counts": {
+          "type": "object",
+          "required": [
+            "registered",
+            "added",
+            "verified",
+            "mismatched",
+            "unregistered"
+          ],
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
         }
       }
     }

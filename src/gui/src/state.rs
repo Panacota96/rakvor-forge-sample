@@ -2,7 +2,8 @@
 //! Kept separate from `app.rs` so it can be unit-tested headless (CI has no display).
 
 use rv_hashinv_core::{
-    Event, HashAlgo, RunConfig, TOOL_NAME, TOOL_VERSION, hash, i18n, time::human_duration,
+    CASE_ROLE, Event, HashAlgo, RunConfig, TOOL_NAME, TOOL_VERSION, case, hash, i18n,
+    time::human_duration,
 };
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -38,6 +39,16 @@ pub struct Outcome {
     pub log_dir: PathBuf,
 }
 
+/// One item's link to the case registry, shown in the result panel.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EvidenceLink {
+    pub index: u64,
+    pub path: String,
+    pub evidence_id: Option<String>,
+    /// registered | already_registered | verified | mismatch | not_in_registry
+    pub status: String,
+}
+
 pub const LANG_CHOICES: [(&str, &str); 4] = [
     ("en", "English"),
     ("es", "Español"),
@@ -70,6 +81,10 @@ pub struct GuiState {
     pub sign_cert: String,
     /// Kept in memory only; never logged.
     pub sign_password: String,
+    /// Shared case folder; when set, the output folder is derived from it and locked.
+    pub case_dir: String,
+    /// Evidence ids reported by the last run (case folder only).
+    pub evidence: Vec<EvidenceLink>,
 }
 
 impl Default for GuiState {
@@ -95,6 +110,8 @@ impl Default for GuiState {
             tsa_url: rv_hashinv_core::trust::DEFAULT_TSA.into(),
             sign_cert: String::new(),
             sign_password: String::new(),
+            case_dir: String::new(),
+            evidence: vec![],
         }
     }
 }
@@ -222,16 +239,77 @@ impl GuiState {
         }
     }
 
+    /// Rule: with a case folder the output folder is `<case>/runs/<tool>/<RUN-ID>` and cannot be edited.
+    pub fn set_case_dir(&mut self, path: &str) {
+        let path = path.trim().trim_matches('"').to_string();
+        if self.case_dir != path {
+            self.case_dir = path.clone();
+            self.note(
+                "ui_case_dir_changed",
+                json!({"path": if path.is_empty() { Value::Null } else { json!(path) }, "role": CASE_ROLE.name()}),
+            );
+        }
+    }
+
+    pub fn out_locked(&self) -> bool {
+        !self.case_dir.trim().is_empty()
+    }
+
+    /// What the output-folder field shows: the derived run folder when a case folder is set.
+    pub fn out_dir_display(&self) -> String {
+        if self.out_locked() {
+            PathBuf::from(self.case_dir.trim())
+                .join("runs")
+                .join(TOOL_NAME)
+                .join("<RUN-ID>")
+                .display()
+                .to_string()
+        } else {
+            self.out_dir.clone()
+        }
+    }
+
+    /// Result-panel lines: "E0001  acta.txt  — Verified: identical to the registered evidence".
+    pub fn evidence_lines(&self) -> Vec<String> {
+        let c = i18n::catalog(&self.ui_lang);
+        self.evidence
+            .iter()
+            .map(|e| {
+                let name = std::path::Path::new(&e.path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| e.path.clone());
+                format!(
+                    "{}  {}  \u{2014} {}",
+                    e.evidence_id.as_deref().unwrap_or("\u{2014}"),
+                    name,
+                    c.label(&format!("case_status_{}", e.status))
+                )
+            })
+            .collect()
+    }
+
     pub fn can_start(&self) -> bool {
-        !self.is_running() && !self.inputs.is_empty() && !self.out_dir.trim().is_empty()
+        !self.is_running()
+            && (!self.inputs.is_empty() || self.out_locked())
+            && (self.out_locked() || !self.out_dir.trim().is_empty())
     }
 
     /// Builds the run configuration; the recorded UI actions become audit preamble entries.
     pub fn to_config(&self) -> Result<RunConfig, String> {
-        if self.inputs.is_empty() {
+        if self.inputs.is_empty() && !self.out_locked() {
             return Err("Add at least one file or folder.".into());
         }
         hash::validate_selection(&self.selected)?;
+        let case_id = Some(self.case_id.trim().to_string()).filter(|s| !s.is_empty());
+        if self.out_locked() {
+            case::preflight(
+                std::path::Path::new(self.case_dir.trim()),
+                case_id.as_deref(),
+                &[],
+            )
+            .map_err(|e| e.message)?;
+        }
         let langs = i18n::parse_langs(&self.lang)?;
         if !self.sign_cert.is_empty() && !std::path::Path::new(&self.sign_cert).is_file() {
             return Err(format!("Signing certificate not found: {}", self.sign_cert));
@@ -239,7 +317,8 @@ impl GuiState {
         let mut preamble = self.ui_actions.clone();
         preamble.push(("ui_start_clicked".into(), json!({"algorithms": self.selected, "lang": self.lang, "recursive": self.recursive,
             "inputs": self.inputs.len(), "jurisdiction": self.jurisdiction, "timestamp": self.timestamp,
-            "pdf_signing": !self.sign_cert.is_empty(), "at_utc": rv_hashinv_core::time::utc_now()})));
+            "pdf_signing": !self.sign_cert.is_empty(), "case_dir": if self.out_locked() { json!(self.case_dir.trim()) } else { Value::Null },
+            "at_utc": rv_hashinv_core::time::utc_now()})));
         let settings = vec![
             format!("{} (gui)", TOOL_NAME),
             format!(
@@ -260,7 +339,15 @@ impl GuiState {
             ),
             format!("lang={}", self.lang),
             format!("recursive={}", self.recursive),
-            format!("out={}", self.out_dir.trim()),
+            format!("out={}", self.out_dir_display().trim()),
+            format!(
+                "case_dir={}",
+                if self.out_locked() {
+                    self.case_dir.trim()
+                } else {
+                    "none"
+                }
+            ),
             format!("jurisdiction={}", self.jurisdiction),
             format!(
                 "tsa={}",
@@ -291,7 +378,7 @@ impl GuiState {
             } else {
                 self.actor.trim().to_string()
             },
-            case_id: Some(self.case_id.trim().to_string()).filter(|s| !s.is_empty()),
+            case_id,
             frontend: "gui".into(),
             preamble,
             command_line: settings,
@@ -313,6 +400,13 @@ impl GuiState {
             } else {
                 Some(self.sign_password.clone())
             },
+            case_dir: if self.out_locked() {
+                Some(PathBuf::from(self.case_dir.trim()))
+            } else {
+                None
+            },
+            evidence_ids: vec![],
+            case_role: CASE_ROLE,
         })
     }
 
@@ -322,6 +416,7 @@ impl GuiState {
         self.current_item.clear();
         self.warnings.clear();
         self.outcome = None;
+        self.evidence.clear();
         // Recorded actions now belong to this run's audit log.
         self.ui_actions.clear();
     }
@@ -337,6 +432,17 @@ impl GuiState {
                 self.progress.bytes_total = *total_bytes;
             }
             Event::ItemStarted { path, .. } => self.current_item = path.clone(),
+            Event::EvidenceLinked {
+                index,
+                path,
+                evidence_id,
+                status,
+            } => self.evidence.push(EvidenceLink {
+                index: *index,
+                path: path.clone(),
+                evidence_id: evidence_id.clone(),
+                status: status.clone(),
+            }),
             Event::Progress {
                 done,
                 total,
@@ -566,6 +672,64 @@ mod tests {
                 .iter()
                 .all(|(_, d)| !d.to_string().contains("password"))
         );
+    }
+
+    #[test]
+    fn case_folder_locks_the_output_folder_and_shows_evidence_ids() {
+        let tmp = std::env::temp_dir().join(format!("rv-gui-case-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("ev")).unwrap();
+        std::fs::write(tmp.join("ev/a.txt"), "a").unwrap();
+        std::fs::write(tmp.join("ev/b.txt"), "b").unwrap();
+        let mut s = GuiState {
+            timestamp: false,
+            ..Default::default()
+        };
+        assert!(!s.can_start());
+        let case_dir = tmp.join("CASE-G");
+        s.set_case_dir(&format!("\"{}\"", case_dir.display()));
+        assert!(
+            s.out_locked() && s.can_start(),
+            "a case folder alone can start (registered items)"
+        );
+        assert!(s.out_dir_display().contains("runs") && s.out_dir_display().ends_with("<RUN-ID>"));
+        assert!(s.to_config().is_err(), "creating a case needs a case id");
+        s.case_id = "CASE-G".into();
+        s.add_input(tmp.join("ev"));
+        if CASE_ROLE == rv_hashinv_core::CaseRole::Analysis {
+            // An analysis tool verifies against a registry: create it with an explicit intake run first.
+            let seed = RunConfig {
+                inputs: vec![tmp.join("ev")],
+                case_id: Some("CASE-G".into()),
+                case_dir: Some(case_dir.clone()),
+                case_role: rv_hashinv_core::CaseRole::Intake,
+                ..Default::default()
+            };
+            let off = std::sync::atomic::AtomicBool::new(false);
+            rv_hashinv_core::run(&seed, &mut |_| {}, &off).unwrap();
+        }
+        let cfg = s.to_config().unwrap();
+        assert_eq!(cfg.case_dir.as_deref(), Some(case_dir.as_path()));
+        assert_eq!(cfg.case_role, CASE_ROLE);
+        let actions: Vec<&str> = cfg.preamble.iter().map(|(a, _)| a.as_str()).collect();
+        assert_eq!(actions[0], "ui_case_dir_changed");
+        s.start();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let summary = rv_hashinv_core::run(&cfg, &mut |e| s.apply(e), &cancel).unwrap();
+        assert_eq!(s.phase, Phase::Finished);
+        assert!(summary.log_dir.starts_with(&case_dir));
+        let ids: Vec<Option<&str>> = s
+            .evidence
+            .iter()
+            .map(|e| e.evidence_id.as_deref())
+            .collect();
+        assert_eq!(ids, vec![Some("E0001"), Some("E0002")]);
+        assert!(s.evidence_lines()[0].starts_with("E0001  a.txt"));
+        let log = std::fs::read_to_string(summary.log_dir.join("audit.jsonl")).unwrap();
+        assert!(log.contains("\"ui_case_dir_changed\"") && log.contains("\"case_linked\""));
+        s.set_case_dir("");
+        assert!(!s.out_locked() && s.out_dir_display() == "rakvor-out");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

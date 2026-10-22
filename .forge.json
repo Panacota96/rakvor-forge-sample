@@ -6,5 +6,13 @@
   "title": "RV HashInv",
   "run_command": "scan",
   "created": "2026-10-19",
-  "cli_command": ["cargo", "run", "-q", "-p", "rv-hashinv-cli", "--"]
+  "cli_command": [
+    "cargo",
+    "run",
+    "-q",
+    "-p",
+    "rv-hashinv-cli",
+    "--"
+  ],
+  "case_role": "intake"
 }
